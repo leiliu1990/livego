@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>LiveGo Test Harness</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font: 13px/1.5 -apple-system, sans-serif; background: #1c1c1e; color: #e5e5ea; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+    #toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #2c2c2e; border-bottom: 1px solid #3a3a3c; flex-shrink: 0; }
+    #toolbar h1 { font-size: 14px; font-weight: 600; margin-right: 4px; }
+    button { padding: 5px 12px; border-radius: 7px; border: none; cursor: pointer; font-size: 12px; font-weight: 500; }
+    .btn-p { background: #30d158; color: #000; }
+    .btn-s { background: #3a3a3c; color: #e5e5ea; }
+    .btn-d { background: #ff453a; color: #fff; }
+    button:disabled { opacity: 0.35; cursor: default; }
+    #cv-status { font-size: 11px; color: #8e8e93; margin-left: auto; }
+
+    #main { display: flex; flex: 1; overflow: hidden; }
+
+    /* ── Left: video + corner picker ── */
+    #left { width: 280px; flex-shrink: 0; display: flex; flex-direction: column; border-right: 1px solid #3a3a3c; }
+    #video-wrap { position: relative; flex: 1; overflow: hidden; background: #000; cursor: crosshair; }
+    #video-wrap video { display: block; width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+    #corner-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+    #corner-bar { padding: 6px 10px; background: #2c2c2e; font-size: 11px; display: flex; align-items: center; gap: 8px; flex-shrink: 0; border-top: 1px solid #3a3a3c; }
+    #corner-bar span { color: #8e8e93; }
+
+    /* ── Right: warped board ── */
+    #right { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    #board-wrap { flex: 1; overflow: hidden; background: #000; display: flex; align-items: center; justify-content: center; }
+    #warped-canvas { max-width: 100%; max-height: 100%; image-rendering: pixelated; }
+
+    /* ── Controls ── */
+    #controls { padding: 8px 12px; background: #2c2c2e; border-top: 1px solid #3a3a3c; flex-shrink: 0; }
+    .ctrl-row { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+    .ctrl { display: flex; align-items: center; gap: 5px; }
+    .ctrl label { font-size: 11px; color: #8e8e93; white-space: nowrap; }
+    .ctrl input[type=range] { width: 90px; accent-color: #30d158; }
+    .ctrl span { font-size: 11px; min-width: 30px; font-family: Menlo, monospace; }
+
+    /* ── Log ── */
+    #log { height: 120px; overflow-y: auto; padding: 6px 12px; background: #000; border-top: 1px solid #3a3a3c; font-size: 11px; font-family: Menlo, monospace; flex-shrink: 0; }
+    .l-info  { color: #636366; }
+    .l-move  { color: #30d158; }
+    .l-warn  { color: #ffd60a; }
+    .l-err   { color: #ff453a; }
+    .l-ok    { color: #30d158; font-weight: bold; }
+    .l-fail  { color: #ff453a; font-weight: bold; }
+
+    #status-bar { padding: 3px 12px; background: #2c2c2e; font-size: 11px; color: #8e8e93; border-top: 1px solid #3a3a3c; flex-shrink: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  </style>
+</head>
+<body>
+
+<div id="toolbar">
+  <h1>LiveGo Test</h1>
+  <input type="file" id="file-input" accept="video/*" style="display:none" onchange="loadVideo(this)">
+  <button class="btn-s" onclick="document.getElementById('file-input').click()">Load Video</button>
+  <button class="btn-s" id="btn-clear" onclick="clearCorners()" disabled>Clear Corners</button>
+  <button class="btn-s" id="btn-peek" onclick="peekEnd()" disabled>Peek End</button>
+  <button class="btn-p" id="btn-run" onclick="startTest()" disabled>Run Test</button>
+  <button class="btn-d" id="btn-stop" onclick="stopTest()" disabled>Stop</button>
+  <span id="cv-status">OpenCV loading…</span>
+</div>
+
+<div id="main">
+  <div id="left">
+    <div id="video-wrap">
+      <video id="video" muted playsinline></video>
+      <canvas id="corner-canvas"></canvas>
+    </div>
+    <div id="corner-bar">
+      <span id="corner-count" title="Tap the 4 outer grid crossings, not the board edge">0 / 4 crossings</span>
+      <button class="btn-s" style="padding:2px 8px; font-size:11px;" onclick="undoCorner()">Undo</button>
+      <button class="btn-s" style="padding:2px 8px; font-size:11px;" onclick="clearCorners()">Reset</button>
+    </div>
+  </div>
+
+  <div id="right">
+    <div id="board-wrap">
+      <canvas id="warped-canvas"></canvas>
+    </div>
+  </div>
+</div>
+
+<div id="controls">
+  <div class="ctrl-row">
+    <div class="ctrl">
+      <label>Seek step (s)</label>
+      <input type="range" id="seek-step" min="0.2" max="3" step="0.1" value="1.0" oninput="syncVal(this,'seek-step-v')">
+      <span id="seek-step-v">1.0</span>
+    </div>
+    <div class="ctrl">
+      <label>Confirm frames</label>
+      <input type="range" id="confirm-frames" min="1" max="6" step="1" value="3" oninput="syncVal(this,'confirm-frames-v')">
+      <span id="confirm-frames-v">3</span>
+    </div>
+    <div class="ctrl">
+      <label>White Δ (brighten)</label>
+      <input type="range" id="white-d" min="5" max="60" step="1" value="18" oninput="syncVal(this,'white-d-v')">
+      <span id="white-d-v">18</span>
+    </div>
+    <div class="ctrl">
+      <label>Black Δ (darken)</label>
+      <input type="range" id="black-d" min="-140" max="-20" step="1" value="-70" oninput="syncVal(this,'black-d-v')">
+      <span id="black-d-v">-70</span>
+    </div>
+    <div class="ctrl" style="margin-left:auto">
+      <label style="color:#e5e5ea">Verify counts manually</label>
+    </div>
+  </div>
+</div>
+
+<div id="log"></div>
+<div id="status-bar">Load a video to begin.</div>
+
+<script src="opencv.js"></script>
+<script src="corners.js?v=9"></script>
+<script src="detector.js?v=9"></script>
+<script>
+// ── State ──────────────────────────────────────────────────────────────────────
+
+let cvReady       = false;
+let videoReady    = false;
+let rawCorners    = []; // display-pixel taps
+let savedCorners  = null; // video-pixel coords (stable)
+let running       = false;
+let detector      = null;
+
+const LS_KEY = 'livego_test_corners';
+
+// Local copies of detector geometry so this page never depends on cross-file
+// consts from detector.js (which can be stale-cached). Must match detector.js.
+const T_WARP   = 760;
+const T_RADIUS = Math.round(((T_WARP - 2 * (T_WARP / 20)) / 18) * 0.45); // = 17
+
+// ── OpenCV ────────────────────────────────────────────────────────────────────
+
+function onOpenCvReady() {
+  if (cvReady) return;
+  cvReady = true;
+  document.getElementById('cv-status').textContent = 'OpenCV ready';
+  updateButtons();
+}
+
+// Poll until cv.Mat is available — works for UMD/asm.js and WASM builds alike.
+(function waitForCV() {
+  if (typeof cv !== 'undefined' && cv.Mat) { onOpenCvReady(); }
+  else setTimeout(waitForCV, 100);
+})();
+
+// ── Video loading ─────────────────────────────────────────────────────────────
+
+function loadVideo(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const url = URL.createObjectURL(file);
+  const video = document.getElementById('video');
+  video.src = url;
+  video.addEventListener('loadedmetadata', () => {
+    videoReady = true;
+    setStatus(`Video: ${video.videoWidth}×${video.videoHeight} · ${video.duration.toFixed(1)}s`);
+    resizeCornerCanvas();
+    tryLoadCorners();
+    updateButtons();
+    log(`Loaded: ${file.name} (${video.videoWidth}×${video.videoHeight}, ${video.duration.toFixed(1)}s)`, 'l-info');
+  }, { once: true });
+  video.load();
+}
+
+// ── Corner canvas sizing ──────────────────────────────────────────────────────
+
+function resizeCornerCanvas() {
+  const video  = document.getElementById('video');
+  const wrap   = document.getElementById('video-wrap');
+  const canvas = document.getElementById('corner-canvas');
+  // object-fit:contain → letterbox offsets
+  const { displayX, displayY, displayW, displayH } = videoDisplayRect();
+  canvas.width  = Math.round(displayW);
+  canvas.height = Math.round(displayH);
+  canvas.style.left   = displayX + 'px';
+  canvas.style.top    = displayY + 'px';
+  canvas.style.width  = displayW + 'px';
+  canvas.style.height = displayH + 'px';
+  redrawCorners();
+}
+
+function videoDisplayRect() {
+  const video = document.getElementById('video');
+  const wrap  = document.getElementById('video-wrap');
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const cw = wrap.clientWidth, ch = wrap.clientHeight;
+  const scale   = Math.min(cw / vw, ch / vh);
+  const displayW = vw * scale;
+  const displayH = vh * scale;
+  const displayX = (cw - displayW) / 2;
+  const displayY = (ch - displayH) / 2;
+  return { displayX, displayY, displayW, displayH, scale };
+}
+
+window.addEventListener('resize', () => { if (videoReady) resizeCornerCanvas(); });
+
+// ── Corner picking ────────────────────────────────────────────────────────────
+
+document.getElementById('video-wrap').addEventListener('click', e => {
+  if (!videoReady) return;
+  if (savedCorners && savedCorners.length === 4) return; // already done
+
+  const wrap  = document.getElementById('video-wrap');
+  const rect  = wrap.getBoundingClientRect();
+  const { displayX, displayY, scale } = videoDisplayRect();
+
+  // Position within the displayed video content
+  const clickX = e.clientX - rect.left - displayX;
+  const clickY = e.clientY - rect.top  - displayY;
+
+  if (clickX < 0 || clickY < 0) return; // clicked in letterbox
+
+  // Convert to video-pixel space (stable, independent of display size)
+  const vpx = clickX / scale;
+  const vpy = clickY / scale;
+
+  rawCorners.push({ vx: vpx, vy: vpy, dx: clickX, dy: clickY });
+
+  if (rawCorners.length === 4) {
+    // Sort into [TL, TR, BR, BL] in video-pixel space
+    savedCorners = sortCorners(rawCorners.map(c => ({ x: c.vx, y: c.vy })));
+    saveCorners();
+    log(`Corners saved (video px): ${savedCorners.map(c => `(${c.x.toFixed(0)},${c.y.toFixed(0)})`).join(' ')}`, 'l-info');
+    updateButtons();
+  }
+
+  redrawCorners();
+  document.getElementById('corner-count').textContent = `${Math.min(rawCorners.length, 4)} / 4 corners`;
+});
+
+function redrawCorners() {
+  const canvas = document.getElementById('corner-canvas');
+  const ctx    = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  const pts = savedCorners
+    ? savedCorners.map(c => {
+        const { scale } = videoDisplayRect();
+        return { x: c.x * scale, y: c.y * scale };
+      })
+    : rawCorners.map(c => ({ x: c.dx, y: c.dy }));
+
+  if (pts.length >= 3) {
+    const sorted = pts.length === 4 ? pts : pts; // already sorted if saved
+    ctx.beginPath();
+    ctx.moveTo(sorted[0].x, sorted[0].y);
+    for (let i = 1; i < sorted.length; i++) ctx.lineTo(sorted[i].x, sorted[i].y);
+    if (sorted.length === 4) ctx.closePath();
+    ctx.strokeStyle = 'rgba(52,199,89,0.85)';
+    ctx.lineWidth   = 2;
+    ctx.stroke();
+    ctx.fillStyle   = 'rgba(52,199,89,0.12)';
+    ctx.fill();
+  }
+
+  pts.forEach((c, i) => {
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, 9, 0, Math.PI * 2);
+    ctx.fillStyle   = '#34c759';
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth   = 2;
+    ctx.stroke();
+    ctx.fillStyle   = '#fff';
+    ctx.font        = 'bold 10px -apple-system';
+    ctx.textAlign   = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(i + 1, c.x, c.y);
+  });
+}
+
+function undoCorner() {
+  if (savedCorners) { savedCorners = null; rawCorners = []; }
+  else if (rawCorners.length > 0) rawCorners.pop();
+  redrawCorners();
+  document.getElementById('corner-count').textContent = `${rawCorners.length} / 4 corners`;
+  updateButtons();
+}
+
+function clearCorners() {
+  savedCorners = null;
+  rawCorners   = [];
+  localStorage.removeItem(LS_KEY);
+  redrawCorners();
+  document.getElementById('corner-count').textContent = '0 / 4 corners';
+  updateButtons();
+  log('Corners cleared.', 'l-info');
+}
+
+function saveCorners() {
+  const video = document.getElementById('video');
+  localStorage.setItem(LS_KEY, JSON.stringify({
+    corners: savedCorners,
+    vidW: video.videoWidth,
+    vidH: video.videoHeight,
+  }));
+}
+
+function tryLoadCorners() {
+  const video = document.getElementById('video');
+  const raw   = localStorage.getItem(LS_KEY);
+  if (!raw) return;
+  try {
+    const { corners, vidW, vidH } = JSON.parse(raw);
+    if (vidW === video.videoWidth && vidH === video.videoHeight) {
+      savedCorners = corners;
+      rawCorners   = corners.map(c => {
+        const { scale } = videoDisplayRect();
+        return { vx: c.x, vy: c.y, dx: c.x * scale, dy: c.y * scale };
+      });
+      document.getElementById('corner-count').textContent = '4 / 4 corners (saved)';
+      redrawCorners();
+      log('Loaded saved corners from localStorage.', 'l-info');
+    }
+  } catch (e) {
+    // ignore stale entry
+  }
+}
+
+// ── Detection helpers (monkey-patchable) ──────────────────────────────────────
+
+function makeDetector(video) {
+  const vidW = video.videoWidth, vidH = video.videoHeight;
+  // Pass corners in video-pixel space; use vidW/vidH as both video and display
+  // dims so _displayToVideoCoords becomes identity.
+  const meta = { vidW, vidH, dispW: vidW, dispH: vidH };
+  const det  = new BoardDetector(video, savedCorners, meta, () => {}, null);
+
+  // Override the delta thresholds with the live slider values so they can be
+  // tuned here. The baseline + grid fit happen automatically in detector.js on
+  // the first frame processed.
+  const whiteD = parseFloat(document.getElementById('white-d').value);
+  const blackD = parseFloat(document.getElementById('black-d').value);
+  det._classifyIntersection = function (r, c) {
+    const { x, y } = this._intersectionPx(r, c);
+    const delta = sampleMean(this._gray, x, y, T_RADIUS) - this._baseline[r][c];
+    if (delta < blackD) return STONE.BLACK;
+    if (delta > whiteD) return STONE.WHITE;
+    return STONE.EMPTY;
+  };
+
+  return { det };
+}
+
+// ── Seek helper ───────────────────────────────────────────────────────────────
+
+function seekTo(video, time) {
+  return new Promise((resolve, reject) => {
+    const tid = setTimeout(() => reject(new Error(`seek timeout at t=${time.toFixed(2)}s`)), 6000);
+    const onSeeked = () => {
+      clearTimeout(tid);
+      // Let Safari present the seeked frame before drawImage() samples it.
+      // Double rAF works for a paused video (requestVideoFrameCallback does not).
+      requestAnimationFrame(() => requestAnimationFrame(resolve));
+    };
+    video.addEventListener('seeked', onSeeked, { once: true });
+    // Setting currentTime to (nearly) its current value fires no 'seeked' — nudge it.
+    if (Math.abs(video.currentTime - time) < 0.005)
+      video.currentTime = Math.min(video.duration, time + 0.03);
+    else
+      video.currentTime = time;
+  });
+}
+
+// Play the video through and invoke perFrame(mediaTime) about every `sampleStep`
+// seconds of media time. Uses requestVideoFrameCallback so the frame drawImage()
+// captures is guaranteed to match its timestamp — unlike seeking a paused video,
+// which Safari renders unreliably. Stops early when the global `running` clears.
+function scanVideo(video, sampleStep, perFrame, rate = 2) {
+  return new Promise(async (resolve) => {
+    video.muted = true;
+    video.playbackRate = rate;
+    let last = -Infinity, done = false;
+    const finish = () => { if (done) return; done = true; video.pause(); resolve(); };
+
+    const cb = (now, meta) => {
+      if (done) return;
+      const t = meta ? meta.mediaTime : video.currentTime;
+      if (t - last >= sampleStep - 1e-3) { last = t; try { perFrame(t); } catch (e) { log('Frame error: ' + e.message, 'l-err'); } }
+      if (video.ended || !running) { finish(); return; }
+      if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(cb);
+      else requestAnimationFrame(() => cb(0, null));
+    };
+
+    video.addEventListener('ended', finish, { once: true });
+    try {
+      video.currentTime = 0;
+      await video.play();
+    } catch (e) { log('play() failed: ' + e.message, 'l-err'); finish(); return; }
+    if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(cb);
+    else requestAnimationFrame(() => cb(0, null));
+  });
+}
+
+// ── Board visualization ───────────────────────────────────────────────────────
+
+function drawBoard(det, rawState, confirmedState) {
+  if (!det._warped || det._warped.isDeleted()) return;
+  const canvas = document.getElementById('warped-canvas');
+  try { cv.imshow(canvas, det._warped); } catch (e) { return; }
+
+  const ctx    = canvas.getContext('2d');
+  const sz     = 760, n = 19;
+  const radius = T_RADIUS;
+  // Use the detector's fitted grid if available; else fall back to the margin model.
+  const col = det._colPos, row = det._rowPos;
+  const margin = sz / (n + 1), step = (sz - 2 * margin) / (n - 1);
+  const gx = c => col ? col[c] : Math.round(margin + c * step);
+  const gy = r => row ? row[r] : Math.round(margin + r * step);
+
+  // Mark the fitted grid intersections faintly so alignment is visible.
+  for (let r = 0; r < n; r++)
+    for (let c = 0; c < n; c++) {
+      ctx.beginPath(); ctx.arc(gx(c), gy(r), 1.5, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,80,80,0.5)'; ctx.fill();
+    }
+
+  for (let r = 0; r < n; r++) {
+    for (let c = 0; c < n; c++) {
+      const x = gx(c), y = gy(r);
+      const raw  = rawState        ? rawState[r][c]        : 0;
+      const conf = confirmedState  ? confirmedState[r][c]  : 0;
+
+      if (raw !== 0) {
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.fillStyle   = raw === 1 ? 'rgba(0,0,0,0.75)' : 'rgba(255,255,255,0.75)';
+        ctx.fill();
+        ctx.strokeStyle = raw === 1 ? '#fff' : '#000';
+        ctx.lineWidth   = 1.5;
+        ctx.stroke();
+      }
+
+      // Red dot: confirmed present but raw says empty (anomaly)
+      if (conf !== 0 && raw === 0) {
+        ctx.beginPath();
+        ctx.arc(x, y, 4, 0, Math.PI * 2);
+        ctx.fillStyle = '#ff453a';
+        ctx.fill();
+      }
+    }
+  }
+}
+
+// ── Full test run ─────────────────────────────────────────────────────────────
+
+async function startTest() {
+  if (running) return;
+  if (!savedCorners) { log('Pick 4 corners first.', 'l-err'); return; }
+  if (!cvReady)      { log('OpenCV not ready.', 'l-err'); return; }
+
+  running = true;
+  updateButtons();
+  document.getElementById('video').pause();
+  document.getElementById('log').innerHTML = '';
+
+  const video        = document.getElementById('video');
+  const seekStep     = parseFloat(document.getElementById('seek-step').value);
+  const confirmFrames = parseInt(document.getElementById('confirm-frames').value);
+  const duration     = video.duration;
+
+  let boardState   = Array.from({ length: BOARD_SIZE }, () => new Array(BOARD_SIZE).fill(STONE.EMPTY));
+  let pendingState = null;
+  let pendingCount = 0;
+  const moves      = [];
+
+  log(`Starting: duration=${isNaN(duration) ? 'unknown' : duration.toFixed(1)}s, seek=${seekStep}s, confirm=${confirmFrames}, whiteΔ>${document.getElementById('white-d').value}, blackΔ<${document.getElementById('black-d').value}`, 'l-info');
+  if (isNaN(duration) || duration === 0) { log('Video duration unknown — try reloading the video.', 'l-err'); running = false; updateButtons(); return; }
+
+  let det = null;
+  try {
+    ({ det } = makeDetector(video));
+    await scanVideo(video, seekStep, (t) => {
+      const rawState = det._detectState();
+      if (!rawState) return; // first frame captures the empty baseline
+
+      const diff = diffStates(boardState, rawState);
+
+      if (diff.length === 0) {
+        pendingState = null;
+        pendingCount = 0;
+      } else if (pendingState && statesEqual(rawState, pendingState)) {
+        pendingCount++;
+        if (pendingCount >= confirmFrames) {
+          const placed  = diff.filter(d => d.from === STONE.EMPTY && d.to !== STONE.EMPTY);
+          const removed = diff.filter(d => d.from !== STONE.EMPTY && d.to === STONE.EMPTY);
+          // Record every stone that appeared this step. Coarse sampling (or fast
+          // play) can reveal several new stones at once; committing them all keeps
+          // the record complete. Order within a batch is by position (unknown).
+          for (const { row, col, to } of placed) {
+            moves.push({ row, col, color: to, t });
+            const sym = to === STONE.BLACK ? '⬤' : '○';
+            log(`Move ${moves.length}: ${sym} (${row},${col})  t=${t.toFixed(1)}s${placed.length > 1 ? ' [batch]' : ''}`, 'l-move');
+          }
+          if (removed.length) log(`  (removed ${removed.length} at t=${t.toFixed(1)}s)`, 'l-warn');
+          boardState = rawState.map(r => [...r]);
+          pendingState = null;
+          pendingCount = 0;
+        }
+      } else {
+        pendingState = rawState.map(r => [...r]);
+        pendingCount = 1;
+      }
+
+      drawBoard(det, rawState, boardState);
+      const blacks = countColor(boardState, 1);
+      const whites = countColor(boardState, 2);
+      setStatus(`t=${t.toFixed(1)}s / ${duration.toFixed(1)}s  ·  confirmed: ${blacks}B ${whites}W  ·  pending=${pendingCount}`);
+    });
+  } catch (e) {
+    log(`Error: ${e.message}`, 'l-err');
+  } finally {
+    det?._freeMats();
+  }
+
+  // Final report — counts on the final board plus the move log, for manual review.
+  const blacks = countColor(boardState, 1);
+  const whites = countColor(boardState, 2);
+  const total  = blacks + whites;
+  log(`─── Final board: ${blacks}B + ${whites}W = ${total} stones  ·  ${moves.length} moves logged ───`, 'l-ok');
+  setStatus(`Done · ${blacks}B + ${whites}W = ${total} on board · ${moves.length} moves`);
+
+  running = false;
+  updateButtons();
+}
+
+// Fast play-through that captures the empty baseline on the first frame, then
+// keeps the last classified board and reports its raw counts. No move logic.
+async function peekEnd() {
+  if (running) return;
+  if (!savedCorners) { log('Pick 4 corners first.', 'l-err'); return; }
+  if (!cvReady)      { log('OpenCV not ready.', 'l-err'); return; }
+
+  running = true;
+  updateButtons();
+  const video = document.getElementById('video');
+  const { det } = makeDetector(video);
+  let lastState = null, maxUp = 0, maxDn = 0;
+
+  try {
+    await scanVideo(video, 1.0, (t) => {
+      const rawState = det._detectState();
+      if (!rawState) {                              // first frame: baseline established
+        log(`Baseline + grid fitted (cols ${det._colPos[0]}..${det._colPos[18]}).`, 'l-info');
+        return;
+      }
+      lastState = rawState;
+      drawBoard(det, rawState, null);
+      for (let r = 0; r < 19; r++)
+        for (let c = 0; c < 19; c++) {
+          const { x, y } = det._intersectionPx(r, c);
+          const d = sampleMean(det._gray, x, y, T_RADIUS) - det._baseline[r][c];
+          if (d > maxUp) maxUp = d;
+          if (d < maxDn) maxDn = d;
+        }
+      setStatus(`Peek scanning t=${t.toFixed(1)}s  ·  ${countColor(rawState,1)}B ${countColor(rawState,2)}W`);
+    }, 4); // 4× speed for a quick pass
+  } catch (e) {
+    log(`Peek error: ${e.message}`, 'l-err');
+  } finally {
+    det._freeMats();
+    running = false;
+    updateButtons();
+  }
+
+  if (lastState) {
+    const b = countColor(lastState, 1), w = countColor(lastState, 2);
+    log(`Peek end: last frame = ${b}B ${w}W  ·  Δ range over scan [${maxDn.toFixed(0)} .. +${maxUp.toFixed(0)}]`, 'l-info');
+    setStatus(`Peek end: ${b}B + ${w}W`);
+  }
+}
+
+function stopTest() {
+  running = false;
+  updateButtons();
+  log('Stopped.', 'l-warn');
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function countColor(state, color) {
+  let n = 0;
+  for (const row of state) for (const s of row) if (s === color) n++;
+  return n;
+}
+
+function syncVal(input, spanId) {
+  document.getElementById(spanId).textContent = input.value;
+}
+
+function log(msg, cls = 'l-info') {
+  const div  = document.getElementById('log');
+  const line = document.createElement('div');
+  line.className   = cls;
+  line.textContent = msg;
+  div.appendChild(line);
+  div.scrollTop = div.scrollHeight;
+}
+
+function setStatus(msg) {
+  document.getElementById('status-bar').textContent = msg;
+}
+
+function updateButtons() {
+  const ready = videoReady && cvReady && savedCorners && savedCorners.length === 4;
+  document.getElementById('btn-run').disabled  = !ready || running;
+  document.getElementById('btn-peek').disabled = !ready || running;
+  document.getElementById('btn-stop').disabled = !running;
+  document.getElementById('btn-clear').disabled = !videoReady;
+}
+</script>
+</body>
+</html>

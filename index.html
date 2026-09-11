@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-fullscreen">
+  <title>LiveGo</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- SCREEN 1: Camera + corner setup -->
+  <div id="screen-setup" class="screen active">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+    <canvas id="loupe"></canvas>
+
+    <div id="setup-ui">
+      <div id="instructions">Press &amp; drag on each of the 4 outer grid crossings — a magnifier helps you place them precisely — then release<br><span id="corner-count">0 / 4 corners set</span></div>
+      <div id="setup-buttons">
+        <button id="btn-undo-corner" class="btn secondary" disabled>Undo</button>
+        <button id="btn-start" class="btn primary" disabled>Start Game</button>
+      </div>
+      <button id="btn-reset-corners" class="btn ghost">Reset Corners</button>
+    </div>
+
+    <!-- Game info form (shown before Start) -->
+    <div id="game-info-form" class="hidden">
+      <h2>Game Info</h2>
+      <label>Black player <input id="input-black" type="text" placeholder="Black"></label>
+      <label>White player <input id="input-white" type="text" placeholder="White"></label>
+      <label>Komi <input id="input-komi" type="number" value="6.5" step="0.5"></label>
+      <div class="form-buttons">
+        <button id="btn-cancel-form" class="btn secondary">Back</button>
+        <button id="btn-confirm-start" class="btn primary">Begin</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- SCREEN 2: Recording -->
+  <div id="screen-record" class="screen">
+    <video id="video2" autoplay playsinline muted></video>
+    <canvas id="board-canvas"></canvas>
+
+    <div id="record-ui">
+      <div id="status-bar">
+        <span id="move-count">Move 0</span>
+        <span id="last-move"></span>
+        <span id="detection-status">●</span>
+      </div>
+      <div id="record-buttons">
+        <button id="btn-undo-move" class="btn secondary">Undo Move</button>
+        <button id="btn-recalibrate" class="btn secondary">Recalibrate</button>
+        <button id="btn-export" class="btn primary">Export SGF</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="opencv.js"></script>
+  <script src="corners.js?v=9"></script>
+  <script src="detector.js?v=9"></script>
+  <script src="sgf.js?v=9"></script>
+  <script src="app.js?v=9"></script>
+</body>
+</html>

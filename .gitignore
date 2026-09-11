@@ -1,0 +1,11 @@
+# Large recording samples — not part of the app
+*.mov
+*.mp4
+*.m4v
+*.MOV
+
+# Local QA scratch (frames, node scripts, tunnel logs)
+scratch_frames/
+
+# OS cruft
+.DS_Store

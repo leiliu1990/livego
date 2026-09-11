@@ -1,0 +1,159 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: #000;
+  color: #fff;
+  font-family: -apple-system, sans-serif;
+  overflow: hidden;
+  height: 100dvh;
+  width: 100dvw;
+}
+
+.screen {
+  display: none;
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+.screen.active { display: flex; flex-direction: column; }
+
+/* ── Camera / Canvas ── */
+video, #overlay, #board-canvas {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  object-fit: cover;
+}
+#overlay, #board-canvas { pointer-events: none; }
+#overlay { z-index: 10; }
+#board-canvas { z-index: 10; }
+
+/* Make the video tap-target work */
+#screen-setup video { z-index: 5; }
+#screen-setup { cursor: crosshair; touch-action: none; }
+
+/* Magnifier loupe for precise corner placement */
+#loupe {
+  position: absolute;
+  width: 132px; height: 132px;
+  border-radius: 50%;
+  border: 3px solid rgba(255,255,255,0.92);
+  box-shadow: 0 3px 14px rgba(0,0,0,0.55);
+  z-index: 30;
+  pointer-events: none;
+  display: none;
+  background: #000;
+}
+#loupe.show { display: block; }
+
+/* ── Setup UI ── */
+#setup-ui {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  z-index: 20;
+  padding: 16px 20px 40px;
+  background: linear-gradient(transparent, rgba(0,0,0,0.85));
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-items: center;
+}
+
+#instructions {
+  font-size: 16px;
+  text-align: center;
+  line-height: 1.5;
+}
+#corner-count { font-size: 13px; opacity: 0.7; }
+
+#setup-buttons {
+  display: flex;
+  gap: 12px;
+  width: 100%;
+}
+
+/* ── Game info form ── */
+#game-info-form {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  background: rgba(0,0,0,0.92);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  justify-content: center;
+  padding: 32px 24px;
+}
+#game-info-form h2 { font-size: 22px; text-align: center; }
+#game-info-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 14px;
+  opacity: 0.8;
+}
+#game-info-form input {
+  background: rgba(255,255,255,0.1);
+  border: 1px solid rgba(255,255,255,0.25);
+  border-radius: 8px;
+  color: #fff;
+  font-size: 17px;
+  padding: 10px 14px;
+}
+.form-buttons { display: flex; gap: 12px; margin-top: 8px; }
+
+/* ── Record UI ── */
+#record-ui {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  z-index: 20;
+  padding: 12px 16px 36px;
+  background: linear-gradient(transparent, rgba(0,0,0,0.85));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+#status-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 15px;
+}
+#move-count { font-weight: 600; }
+#last-move { opacity: 0.7; flex: 1; }
+#detection-status { font-size: 18px; color: #4caf50; }
+#detection-status.warn { color: #ff9800; }
+#detection-status.err  { color: #f44336; }
+
+#record-buttons { display: flex; gap: 10px; }
+
+/* ── Buttons ── */
+.btn {
+  flex: 1;
+  padding: 13px 10px;
+  border: none;
+  border-radius: 12px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.btn:disabled { opacity: 0.35; }
+.btn.primary  { background: #34c759; color: #000; }
+.btn.secondary { background: rgba(255,255,255,0.18); color: #fff; }
+.btn.ghost    { background: transparent; color: rgba(255,255,255,0.5); font-size: 13px; flex: 0; }
+
+/* ── Corner dots ── */
+.corner-dot {
+  position: absolute;
+  width: 22px; height: 22px;
+  border-radius: 50%;
+  background: #34c759;
+  border: 3px solid #fff;
+  transform: translate(-50%, -50%);
+  z-index: 15;
+  pointer-events: none;
+}
+
+.hidden { display: none !important; }
