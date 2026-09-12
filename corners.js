@@ -51,7 +51,7 @@ class CornerPicker {
   // ── Rough tap → open magnifier ──────────────────────────────────────────────
 
   _onRoughTap(e) {
-    if (e.target.closest('button') || e.target.closest('#game-info-form')) return;
+    if (e.target.closest('button') || e.target.closest('#game-info-form') || e.target.closest('#lens-bar')) return;
     if (this.rawCorners.length >= MAX_CORNERS) return;
     if (this.zoomOverlay && this.zoomOverlay.classList.contains('show')) return;
 
