@@ -1,6 +1,17 @@
 const BOARD_SIZE      = 19;
-const SAMPLE_INTERVAL = 1500; // ms between frames
-const CONFIRM_FRAMES  = 3;    // consecutive identical states before recording a move
+// Detection is motion-gated rather than time-gated: we sample often, ignore
+// frames while the scene is moving (a hand placing a stone, camera shake), and
+// commit as soon as the board settles. This responds to fast play — a move is
+// recorded ~QUIET_FRAMES samples after the hand withdraws, not after a fixed
+// multi-second wait.
+const SAMPLE_INTERVAL = 400;   // ms between frames (fast; motion gating does the filtering)
+const QUIET_FRAMES    = 2;     // settled (low-motion) samples of a stable state before committing
+// Motion = fraction of board pixels that changed materially since the last frame.
+// A hand/arm over the board changes a large contiguous area (>10%); placing one
+// stone changes ~0.2%; sensor noise ~0%. Robust to exposure/noise unlike a raw
+// brightness delta. Above this fraction, the scene is "moving" and we wait.
+const MOTION_PIXEL_DELTA = 25;    // per-pixel gray change counted as "changed"
+const MOTION_THRESH      = 0.03;  // fraction of changed pixels above which we suppress
 
 const STONE = { EMPTY: 0, BLACK: 1, WHITE: 2 };
 
@@ -36,6 +47,10 @@ class BoardDetector {
     this._src    = null;
     this._warped = null;
     this._gray   = null;
+    this._prevGray = null;  // previous frame's warped gray, for motion detection
+    this._diff     = null;
+    this._diffMask = null;
+    this._motion   = Infinity;
 
     // Empty-board reference, established from the first good frame.
     this._baseline = null;                 // 19×19 brightness of the empty board
@@ -94,6 +109,20 @@ class BoardDetector {
     cv.cvtColor(this._warped, this._gray, cv.COLOR_RGBA2GRAY);
     const ksize = new cv.Size(5, 5);
     cv.GaussianBlur(this._gray, this._gray, ksize, 0);
+
+    // Motion = fraction of pixels that changed materially since the last frame.
+    // High while a hand covers part of the board; near-zero once it settles.
+    if (!this._prevGray) {
+      this._prevGray = new cv.Mat();
+      this._diff     = new cv.Mat();
+      this._diffMask = new cv.Mat();
+      this._motion   = Infinity;
+    } else {
+      cv.absdiff(this._gray, this._prevGray, this._diff);
+      cv.threshold(this._diff, this._diffMask, MOTION_PIXEL_DELTA, 255, cv.THRESH_BINARY);
+      this._motion = cv.countNonZero(this._diffMask) / (this._gray.rows * this._gray.cols);
+    }
+    this._gray.copyTo(this._prevGray);
 
     // First good frame: the board is empty. Lock the grid to the real lines and
     // record each intersection's empty brightness. Commit no moves this frame.
@@ -200,6 +229,15 @@ class BoardDetector {
   }
 
   _reconcile(newState) {
+    // While the scene is moving (a hand over the board, camera shake), readings
+    // are unreliable — some cells are occluded. Wait for it to settle. This is
+    // what lets us commit quickly afterwards instead of counting fixed seconds.
+    if (this._motion > MOTION_THRESH) {
+      this.pendingState = null;
+      this.pendingCount = 0;
+      return;
+    }
+
     const diff = diffStates(this.boardState, newState);
 
     if (diff.length === 0) {
@@ -215,7 +253,9 @@ class BoardDetector {
       this.pendingCount = 1;
     }
 
-    if (this.pendingCount >= CONFIRM_FRAMES) {
+    // Board has settled to a new stable state → commit after a couple of quiet
+    // frames (guards against a single noisy sample).
+    if (this.pendingCount >= QUIET_FRAMES) {
       this._commitState(newState, diff);
       this.pendingState = null;
       this.pendingCount = 0;
@@ -251,9 +291,12 @@ class BoardDetector {
   }
 
   _freeMats() {
-    if (this._src)    { this._src.delete();    this._src    = null; }
-    if (this._warped) { this._warped.delete();  this._warped = null; }
-    if (this._gray)   { this._gray.delete();    this._gray   = null; }
+    if (this._src)      { this._src.delete();      this._src      = null; }
+    if (this._warped)   { this._warped.delete();   this._warped   = null; }
+    if (this._gray)     { this._gray.delete();     this._gray     = null; }
+    if (this._prevGray) { this._prevGray.delete(); this._prevGray = null; }
+    if (this._diff)     { this._diff.delete();     this._diff     = null; }
+    if (this._diffMask) { this._diffMask.delete(); this._diffMask = null; }
   }
 }
 
