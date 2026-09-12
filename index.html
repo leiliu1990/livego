@@ -6,7 +6,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-fullscreen">
   <title>LiveGo</title>
-  <link rel="stylesheet" href="style.css?v=10">
+  <link rel="stylesheet" href="style.css?v=11">
 </head>
 <body>
 
@@ -14,6 +14,11 @@
   <div id="screen-setup" class="screen active">
     <video id="video" autoplay playsinline muted></video>
     <canvas id="overlay"></canvas>
+
+    <!-- Lens / camera picker (0.5×, 1×, …) -->
+    <div id="lens-bar" style="display:none">
+      <label>Lens <select id="lens-select"></select></label>
+    </div>
 
     <!-- Two-tap magnifier: tap near a crossing, then tap the exact spot here -->
     <div id="zoom-overlay">
@@ -64,9 +69,9 @@
   </div>
 
   <script src="opencv.js"></script>
-  <script src="corners.js?v=10"></script>
-  <script src="detector.js?v=10"></script>
-  <script src="sgf.js?v=10"></script>
-  <script src="app.js?v=10"></script>
+  <script src="corners.js?v=11"></script>
+  <script src="detector.js?v=11"></script>
+  <script src="sgf.js?v=11"></script>
+  <script src="app.js?v=11"></script>
 </body>
 </html>

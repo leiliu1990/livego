@@ -32,6 +32,29 @@ video, #overlay, #board-canvas {
 #screen-setup video { z-index: 5; }
 #screen-setup { cursor: crosshair; touch-action: none; }
 
+/* Lens / camera picker */
+#lens-bar {
+  position: absolute;
+  top: calc(env(safe-area-inset-top, 0px) + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 25;
+  background: rgba(0,0,0,0.55);
+  border-radius: 20px;
+  padding: 6px 14px;
+  backdrop-filter: blur(6px);
+}
+#lens-bar label { color: #fff; font-size: 13px; font-weight: 600; }
+#lens-bar select {
+  background: transparent;
+  color: #fff;
+  border: none;
+  font-size: 13px;
+  font-weight: 600;
+  margin-left: 4px;
+}
+#lens-bar select option { color: #000; }
+
 /* Two-tap magnifier for precise corner placement */
 #zoom-overlay {
   position: absolute;

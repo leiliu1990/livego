@@ -4,6 +4,7 @@ let detector        = null;
 let recorder        = null;
 let confirmedCorners     = null;
 let confirmedDisplayMeta = null;
+let lastMove             = null; // {row, col, color} — highlighted on the overlay
 
 function onOpenCvReady() {
   if (cvReady) return;
@@ -31,8 +32,71 @@ async function boot() {
     video2.srcObject = stream;
 
     setupCornerUI();
+    populateLensOptions(); // labels are available now that permission is granted
   } catch (e) {
     alert('Camera access denied. Please allow camera and reload.');
+    console.error(e);
+  }
+}
+
+// ── Lens / camera picker ────────────────────────────────────────────────────────
+
+function friendlyLensName(label) {
+  if (/ultra.?wide/i.test(label))       return '0.5× Ultra-Wide';
+  if (/tele/i.test(label))              return '2× Telephoto';
+  if (/dual|triple|wide angle/i.test(label)) return 'Auto (multi-cam)';
+  if (/back|rear|wide|environment/i.test(label)) return '1× Wide';
+  return label || 'Camera';
+}
+
+async function populateLensOptions() {
+  const sel = document.getElementById('lens-select');
+  const bar = document.getElementById('lens-bar');
+  if (!sel || !bar) return;
+  let devices = [];
+  try { devices = await navigator.mediaDevices.enumerateDevices(); } catch (e) { return; }
+
+  const cams = devices.filter(d => d.kind === 'videoinput');
+  const back = cams.filter(d => /back|rear|environment/i.test(d.label));
+  const list = back.length ? back : cams;
+  if (list.length <= 1) { bar.style.display = 'none'; return; } // nothing to choose
+
+  const curId = currentVideoDeviceId();
+  sel.innerHTML = '';
+  for (const d of list) {
+    const opt = document.createElement('option');
+    opt.value = d.deviceId;
+    opt.textContent = friendlyLensName(d.label);
+    if (d.deviceId === curId) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  bar.style.display = '';
+  sel.onchange = () => switchLens(sel.value);
+}
+
+function currentVideoDeviceId() {
+  const s = document.getElementById('video').srcObject;
+  const t = s && s.getVideoTracks()[0];
+  return t ? t.getSettings().deviceId : null;
+}
+
+async function switchLens(deviceId) {
+  try {
+    const old = document.getElementById('video').srcObject;
+    if (old) old.getTracks().forEach(t => t.stop());
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { deviceId: { exact: deviceId }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      audio: false,
+    });
+    document.getElementById('video').srcObject  = stream;
+    document.getElementById('video2').srcObject = stream;
+
+    // Framing changed → any picked corners are no longer valid.
+    cornerPicker.reset();
+    confirmedCorners = null;
+    document.getElementById('btn-start').disabled = true;
+  } catch (e) {
+    alert('Could not switch lens: ' + e.message);
     console.error(e);
   }
 }
@@ -118,6 +182,7 @@ function startRecording() {
 function onMoveDetected(moveObj) {
   recorder.addMove(moveObj);
   recorder.clearRedo();
+  lastMove = { row: moveObj.row, col: moveObj.col, color: moveObj.color };
   updateRecordUI();
   flashStatus();
 }
@@ -126,12 +191,15 @@ function undoMove() {
   if (!recorder || recorder.moveCount === 0) return;
   const m = recorder.undoLast();
   if (m && detector) detector.undoLastMove(deepCloneBoard(detector.boardState));
+  const prev = recorder.moves[recorder.moves.length - 1];
+  lastMove = prev ? { row: prev.row, col: prev.col, color: prev.color } : null;
   updateRecordUI();
 }
 
 function recalibrate() {
   detector.stop();
   showScreen('screen-setup');
+  populateLensOptions();
   cornerPicker.reset();
   confirmedCorners     = null;
   confirmedDisplayMeta = null;
@@ -232,6 +300,19 @@ function drawBoardOverlay(canvas, boardState) {
       ctx.lineWidth   = 0.6;
       ctx.stroke();
     }
+  }
+
+  // Mark the latest move with a red dot (only if that stone is still present).
+  if (lastMove && boardState[lastMove.row] && boardState[lastMove.row][lastMove.col] === lastMove.color) {
+    const px = x0 + MARGIN + lastMove.col * STEP;
+    const py = y0 + MARGIN + lastMove.row * STEP;
+    ctx.beginPath();
+    ctx.arc(px, py, Math.max(2, SR * 0.42), 0, Math.PI * 2);
+    ctx.fillStyle   = '#ff3b30';
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth   = 1;
+    ctx.stroke();
   }
 }
 
