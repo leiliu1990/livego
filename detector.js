@@ -12,11 +12,6 @@ const QUIET_FRAMES    = 2;     // settled (low-motion) samples of a stable state
 // brightness delta. Above this fraction, the scene is "moving" and we wait.
 const MOTION_PIXEL_DELTA = 25;    // per-pixel gray change counted as "changed"
 const MOTION_THRESH      = 0.03;  // fraction of changed pixels above which we suppress
-// You can place only a stone or two between settles, but a lighting change flips
-// many cells at once. If more than this many cells newly read as stones, it's not
-// real play — absorb the frame as the new background instead of recording moves.
-// (Removals aren't capped: a capture legitimately clears many stones.)
-const MAX_PLACED_PER_STEP = 6;
 
 const STONE = { EMPTY: 0, BLACK: 1, WHITE: 2 };
 
@@ -57,7 +52,6 @@ class BoardDetector {
     this._diffMask = null;
     this._motion   = Infinity;
     this._ambient  = 0;     // per-frame global lighting shift vs baseline
-    this._cur      = null;  // per-frame current brightness at each intersection
 
     // Empty-board reference, established from the first good frame.
     this._baseline = null;                 // 19×19 brightness of the empty board
@@ -145,18 +139,12 @@ class BoardDetector {
     // The MEDIAN delta is the shift: most cells are empty, so stones are outliers
     // that the median ignores. Subtracting it re-references the baseline to the
     // current lighting. Classification then only fires on *local* changes.
-    this._cur = [];
     const deltas = [];
-    for (let r = 0; r < BOARD_SIZE; r++) {
-      const row = [];
+    for (let r = 0; r < BOARD_SIZE; r++)
       for (let c = 0; c < BOARD_SIZE; c++) {
         const { x, y } = this._intersectionPx(r, c);
-        const v = sampleMean(this._gray, x, y, STONE_RADIUS);
-        row.push(v);
-        deltas.push(v - this._baseline[r][c]);
+        deltas.push(sampleMean(this._gray, x, y, STONE_RADIUS) - this._baseline[r][c]);
       }
-      this._cur.push(row);
-    }
     this._ambient = medianOf(deltas);
 
     const state = [];
@@ -284,33 +272,10 @@ class BoardDetector {
     // Board has settled to a new stable state → commit after a couple of quiet
     // frames (guards against a single noisy sample).
     if (this.pendingCount >= QUIET_FRAMES) {
-      // Too many cells newly show stones at once? That's a lighting/background
-      // change, not play (you can't place 7 stones in one turn). Absorb the
-      // current frame as the new baseline and record nothing. Removals are not
-      // counted — a capture can legitimately clear many stones at once.
-      const placedNow = diff.filter(d => d.from === STONE.EMPTY && d.to !== STONE.EMPTY).length;
-      if (placedNow > MAX_PLACED_PER_STEP) {
-        this._rebaseline();
-      } else {
-        this._commitState(newState, diff);
-      }
+      this._commitState(newState, diff);
       this.pendingState = null;
       this.pendingCount = 0;
     }
-  }
-
-  // Adopt the current settled frame as the new empty-board reference, folding in
-  // the ambient shift so existing (already-recorded) stones stay stones. Called
-  // when a change is too large to be real play — i.e. a lighting/background shift.
-  _rebaseline() {
-    if (!this._cur) return;
-    for (let r = 0; r < BOARD_SIZE; r++)
-      for (let c = 0; c < BOARD_SIZE; c++) {
-        // Only re-baseline EMPTY points; keep known stones anchored to their old
-        // baseline so they remain detectable after the lighting change.
-        if (this.boardState[r][c] === STONE.EMPTY) this._baseline[r][c] = this._cur[r][c];
-      }
-    this._ambient = 0;
   }
 
   _commitState(newState, diff) {
