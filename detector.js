@@ -13,12 +13,20 @@ const QUIET_FRAMES    = 2;     // settled (low-motion) samples of a stable state
 const MOTION_PIXEL_DELTA = 25;    // per-pixel gray change counted as "changed"
 const MOTION_THRESH      = 0.03;  // fraction of changed pixels above which we suppress
 
+// Occlusion: a hand/arm over the board shows up as one large blob that differs
+// from the empty board AND touches the warped image border (the arm reaches in
+// from outside). Interior stone groups never touch the border, so even dense
+// positions stay valid. Ambient-compensated so a uniform shadow isn't mistaken
+// for an object. A frame with such a blob is INVALID — we don't diff it at all.
+const OCC_PIXEL_DELTA = 40; // brightness diff above the ambient level counted as "foreign"
+
 const STONE = { EMPTY: 0, BLACK: 1, WHITE: 2 };
 
 const WARP_SIZE   = 760;                                              // px — perspective-corrected board output size
 const WARP_MARGIN = WARP_SIZE / (BOARD_SIZE + 1);                    // px from edge to first grid line
 const WARP_STEP   = (WARP_SIZE - 2 * WARP_MARGIN) / (BOARD_SIZE - 1); // px between adjacent grid lines
 const STONE_RADIUS = Math.round(WARP_STEP * 0.45);                   // sampling radius ≈ 45% of one grid cell
+const OCC_BLOB_MIN = Math.round(4 * Math.PI * STONE_RADIUS * STONE_RADIUS); // blob ≥ ~4 stones ⇒ not a stone (a hand)
 
 // Stones are classified by how much each intersection's brightness CHANGES from
 // the empty board captured at the start — not by absolute brightness. This is
@@ -53,10 +61,15 @@ class BoardDetector {
     this._motion   = Infinity;
     this._ambient  = 0;     // per-frame global lighting shift vs baseline
 
+    this._occluded = false; // is a hand/arm covering part of the board this frame?
+    this._occBlob  = 0;     // largest foreign blob area (px), for debug
+    this._occMats  = null;  // lazily-allocated scratch mats for occlusion
+
     // Empty-board reference, established from the first good frame.
-    this._baseline = null;                 // 19×19 brightness of the empty board
-    this._colPos   = null;                 // fitted grid line x-positions (in warp px)
-    this._rowPos   = null;                 // fitted grid line y-positions
+    this._baseline     = null;             // 19×19 brightness of the empty board
+    this._baselineGray = null;             // full warped gray of the empty board (for occlusion)
+    this._colPos       = null;             // fitted grid line x-positions (in warp px)
+    this._rowPos       = null;             // fitted grid line y-positions
   }
 
   start() {
@@ -130,8 +143,13 @@ class BoardDetector {
     if (!this._baseline) {
       this._fitGrid();
       this._captureBaseline();
+      this._baselineGray = this._gray.clone(); // full empty-board image for occlusion
       return null;
     }
+
+    // Is a hand/arm over the board? If so the frame is invalid — _reconcile skips
+    // it, so we never diff an occluded view. Computed before classification.
+    this._computeOcclusion();
 
     // Estimate the ambient lighting shift so a uniform change (e.g. a shadow
     // falling over the whole board) doesn't look like stones. Each cell's delta
@@ -154,6 +172,52 @@ class BoardDetector {
       state.push(row);
     }
     return state;
+  }
+
+  // Detect a hand/arm over the board. Diff the warped frame against the empty
+  // board, remove the uniform lighting level (ambient) so a shadow doesn't count,
+  // keep only solid regions (morphological open erases thin grid lines/noise),
+  // then take the largest connected blob. A hand is large AND touches the image
+  // border (the arm enters from outside); interior stone groups never do.
+  _computeOcclusion() {
+    if (!this._baselineGray) { this._occluded = false; return; }
+    if (!this._occMats) {
+      this._occMats = {
+        diff:   new cv.Mat(),
+        mask:   new cv.Mat(),
+        kernel: cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(9, 9)),
+        labels: new cv.Mat(),
+        stats:  new cv.Mat(),
+        cent:   new cv.Mat(),
+      };
+    }
+    const M = this._occMats;
+    cv.absdiff(this._gray, this._baselineGray, M.diff);
+
+    // Ambient level = sparse median of the diff (uniform shift from lighting).
+    const data = M.diff.data;
+    const samp = [];
+    for (let i = 0; i < data.length; i += 997) samp.push(data[i]);
+    samp.sort((a, b) => a - b);
+    const amb = samp[samp.length >> 1];
+
+    cv.threshold(M.diff, M.mask, amb + OCC_PIXEL_DELTA, 255, cv.THRESH_BINARY);
+    cv.morphologyEx(M.mask, M.mask, cv.MORPH_OPEN, M.kernel);
+
+    const n = cv.connectedComponentsWithStats(M.mask, M.labels, M.stats, M.cent, 8);
+    let li = 0, larea = 0;
+    for (let i = 1; i < n; i++) {
+      const a = M.stats.intAt(i, cv.CC_STAT_AREA);
+      if (a > larea) { larea = a; li = i; }
+    }
+    let touches = false;
+    if (li) {
+      const x = M.stats.intAt(li, cv.CC_STAT_LEFT), y = M.stats.intAt(li, cv.CC_STAT_TOP);
+      const w = M.stats.intAt(li, cv.CC_STAT_WIDTH), h = M.stats.intAt(li, cv.CC_STAT_HEIGHT);
+      touches = (x <= 2 || y <= 2 || x + w >= WARP_SIZE - 2 || y + h >= WARP_SIZE - 2);
+    }
+    this._occBlob  = larea;
+    this._occluded = (larea >= OCC_BLOB_MIN && touches);
   }
 
   // Convert a CSS-pixel tap point (from the setup screen) to video-pixel coords.
@@ -245,10 +309,11 @@ class BoardDetector {
   }
 
   _reconcile(newState) {
-    // While the scene is moving (a hand over the board, camera shake), readings
-    // are unreliable — some cells are occluded. Wait for it to settle. This is
-    // what lets us commit quickly afterwards instead of counting fixed seconds.
-    if (this._motion > MOTION_THRESH) {
+    // Only diff VALID frames — static (no motion) AND unoccluded (no hand/arm
+    // over the board). An invalid frame's readings can't be trusted, so we skip
+    // it entirely. When the board next becomes visible and settled, the diff
+    // reflects real play, even if several stones were placed during occlusion.
+    if (this._motion > MOTION_THRESH || this._occluded) {
       this.pendingState = null;
       this.pendingCount = 0;
       return;
@@ -313,6 +378,11 @@ class BoardDetector {
     if (this._prevGray) { this._prevGray.delete(); this._prevGray = null; }
     if (this._diff)     { this._diff.delete();     this._diff     = null; }
     if (this._diffMask) { this._diffMask.delete(); this._diffMask = null; }
+    if (this._baselineGray) { this._baselineGray.delete(); this._baselineGray = null; }
+    if (this._occMats) {
+      for (const m of Object.values(this._occMats)) m.delete();
+      this._occMats = null;
+    }
   }
 }
 
