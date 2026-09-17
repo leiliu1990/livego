@@ -337,10 +337,33 @@ class BoardDetector {
     // Board has settled to a new stable state → commit after a couple of quiet
     // frames (guards against a single noisy sample).
     if (this.pendingCount >= QUIET_FRAMES) {
-      this._commitState(newState, diff);
+      if (this._alternationOK(diff)) {
+        this._commitState(newState, diff);
+      }
+      // else: change violates alternation (e.g. a swath of false white from a
+      // lighting shift) → skip this frame; record nothing, leave state/baseline.
       this.pendingState = null;
       this.pendingCount = 0;
     }
+  }
+
+  // Go alternates B/W, so between two valid frames the net new stones must be
+  // colour-balanced (|black - white| ≤ 1). A burst of same-colour stones — what a
+  // lighting shift produces as a field of false white — can't be real play.
+  //
+  // Black plays first, so before any white appears we allow any number of new
+  // black stones (a handicap setup places several black stones up front). The
+  // rule ACTIVATES the moment white appears — including that first white move
+  // itself, which must be balanced (1 white, or 1 black + 1 white if a sample
+  // was skipped). This is what stops a sudden field of false white from ever
+  // being recorded.
+  _alternationOK(diff) {
+    const placed = diff.filter(d => d.from === STONE.EMPTY && d.to !== STONE.EMPTY);
+    const nb = placed.filter(d => d.to === STONE.BLACK).length;
+    const nw = placed.filter(d => d.to === STONE.WHITE).length;
+    const boardHasWhite = this.boardState.some(row => row.some(v => v === STONE.WHITE));
+    if (!boardHasWhite && nw === 0) return true; // pre-activation: black handicap/opening
+    return Math.abs(nb - nw) <= 1;
   }
 
   _commitState(newState, diff) {
