@@ -67,17 +67,37 @@ class SGFRecorder {
     return sgf;
   }
 
-  download() {
+  async download() {
     const sgf = this.buildSGF();
-    const blob = new Blob([sgf], { type: 'application/x-go-sgf' });
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 16);
+    const filename = `livego-${stamp}.sgf`;
+    const blob = new Blob([sgf], { type: 'text/plain' });
+
+    // iOS Safari ignores <a download>, so prefer the Web Share API, which opens
+    // the system share sheet ("Save to Files", AirDrop, Messages…). Must run
+    // synchronously inside the click gesture — share() is the first await here.
+    if (navigator.canShare) {
+      const file = new File([blob], filename, { type: 'text/plain' });
+      if (navigator.canShare({ files: [file] })) {
+        try {
+          await navigator.share({ files: [file], title: filename });
+          return;
+        } catch (e) {
+          if (e.name === 'AbortError') return; // user cancelled — not an error
+          // otherwise fall through to the anchor method
+        }
+      }
+    }
+
+    // Desktop / fallback: real download via a temporary anchor.
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    const now = new Date();
-    const stamp = now.toISOString().replace(/[:.]/g, '-').slice(0, 16);
     a.href = url;
-    a.download = `livego-${stamp}.sgf`;
+    a.download = filename;
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000); // revoke after the download starts
   }
 }
 
