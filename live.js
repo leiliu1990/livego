@@ -4,7 +4,7 @@
 //
 // SETUP: paste your Realtime Database URL below (from the Firebase console),
 // e.g. https://livego-xxxx-default-rtdb.firebaseio.com  (no trailing slash).
-const FIREBASE_DB_URL = 'PASTE_YOUR_FIREBASE_DB_URL_HERE';
+const FIREBASE_DB_URL = 'https://livego-ll-default-rtdb.firebaseio.com';
 
 function liveConfigured() {
   return FIREBASE_DB_URL && !FIREBASE_DB_URL.startsWith('PASTE_');
