@@ -168,7 +168,7 @@ function startRecording() {
     confirmedCorners,
     confirmedDisplayMeta,
     onMoveDetected,
-    (boardState) => drawBoardOverlay(boardCanvas, boardState),
+    (boardState) => { drawBoardOverlay(boardCanvas, boardState); updateDebugHUD(); },
   );
   detector.start();
 
@@ -177,6 +177,55 @@ function startRecording() {
   document.getElementById('btn-undo-move').addEventListener('click', undoMove);
   document.getElementById('btn-recalibrate').addEventListener('click', recalibrate);
   document.getElementById('btn-export').addEventListener('click', () => recorder.download());
+  document.getElementById('btn-debug-toggle').addEventListener('click', toggleDebugHUD);
+  document.getElementById('btn-debug-export').addEventListener('click', exportDebugLog);
+}
+
+// ── Debug HUD + export ──────────────────────────────────────────────────────────
+
+function toggleDebugHUD() {
+  document.getElementById('debug-hud').classList.toggle('hidden');
+}
+
+function updateDebugHUD() {
+  const hud = document.getElementById('debug-hud');
+  if (!hud || hud.classList.contains('hidden') || !detector) return;
+  const d = detector.debug.last;
+  const imgs = detector.debug.images.length, frames = detector.debug.frames.length;
+  hud.textContent =
+    `frame ${detector.debug.frameNo}\n` +
+    `event  ${d.ev}\n` +
+    `motion ${(d.motion ?? 0).toFixed(3)}  ${d.motion > 0.03 ? 'MOVING' : ''}\n` +
+    `occl   ${d.occ ? 'YES' : 'no'}\n` +
+    `ambient ${(d.amb ?? 0).toFixed(1)}\n` +
+    `board  ${d.nB ?? 0}B ${d.nW ?? 0}W\n` +
+    `log    ${frames}f ${imgs}img`;
+}
+
+async function exportDebugLog() {
+  if (!detector) return;
+  const json = detector.getDebugJSON();
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 16);
+  const filename = `livego-debug-${stamp}.json`;
+  const blob = new Blob([json], { type: 'application/json' });
+  const sizeMB = (blob.size / 1e6).toFixed(1);
+  try {
+    if (navigator.canShare) {
+      const file = new File([blob], filename, { type: 'application/json' });
+      if (navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: filename });
+        return;
+      }
+    }
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  alert(`Debug log ${sizeMB}MB downloaded.`);
 }
 
 function onMoveDetected(moveObj) {
@@ -215,7 +264,7 @@ function recalibrate() {
       confirmedCorners,
       confirmedDisplayMeta,
       onMoveDetected,
-      (boardState) => drawBoardOverlay(boardCanvas, boardState),
+      (boardState) => { drawBoardOverlay(boardCanvas, boardState); updateDebugHUD(); },
     );
     detector.start();
     showScreen('screen-record');

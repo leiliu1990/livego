@@ -6,7 +6,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-fullscreen">
   <title>LiveGo</title>
-  <link rel="stylesheet" href="style.css?v=19">
+  <link rel="stylesheet" href="style.css?v=20">
 </head>
 <body>
 
@@ -54,6 +54,9 @@
     <video id="video2" autoplay playsinline muted></video>
     <canvas id="board-canvas"></canvas>
 
+    <!-- Live debug HUD (tap to toggle) -->
+    <div id="debug-hud" class="hidden"></div>
+
     <div id="record-ui">
       <div id="status-bar">
         <span id="move-count">Move 0</span>
@@ -65,13 +68,17 @@
         <button id="btn-recalibrate" class="btn secondary">Recalibrate</button>
         <button id="btn-export" class="btn primary">Export SGF</button>
       </div>
+      <div id="record-buttons">
+        <button id="btn-debug-toggle" class="btn ghost">Debug HUD</button>
+        <button id="btn-debug-export" class="btn ghost">Export Debug Log</button>
+      </div>
     </div>
   </div>
 
   <script src="opencv.js"></script>
-  <script src="corners.js?v=19"></script>
-  <script src="detector.js?v=19"></script>
-  <script src="sgf.js?v=19"></script>
-  <script src="app.js?v=19"></script>
+  <script src="corners.js?v=20"></script>
+  <script src="detector.js?v=20"></script>
+  <script src="sgf.js?v=20"></script>
+  <script src="app.js?v=20"></script>
 </body>
 </html>

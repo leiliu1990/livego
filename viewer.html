@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>LiveGo — Viewer</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    :root { --bg:#1c1c1e; --panel:#2c2c2e; --line:#3a3a3c; --fg:#e5e5ea; --dim:#8e8e93; --accent:#30d158; }
+    html, body { height: 100%; }
+    body {
+      background: var(--bg); color: var(--fg);
+      font: 15px/1.4 -apple-system, system-ui, sans-serif;
+      display: flex; flex-direction: column; align-items: center;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    }
+
+    header {
+      width: 100%; max-width: 640px;
+      display: flex; align-items: center; gap: 10px;
+      padding: 12px 16px;
+    }
+    header h1 { font-size: 17px; font-weight: 600; }
+    #live-badge {
+      margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px; font-weight: 600; color: var(--dim);
+      padding: 4px 10px; border-radius: 20px; background: var(--panel);
+    }
+    #live-badge .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+    #live-badge.live { color: var(--accent); }
+    #live-badge.live .dot { background: var(--accent); box-shadow: 0 0 6px var(--accent); animation: pulse 1.6s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+    #players {
+      width: 100%; max-width: 640px;
+      display: flex; justify-content: space-between; gap: 12px;
+      padding: 0 16px 8px;
+      font-size: 13px; color: var(--dim);
+    }
+    #players b { color: var(--fg); font-weight: 600; }
+    .pdot { display:inline-block; width:11px; height:11px; border-radius:50%; vertical-align:-1px; margin-right:5px; border:1px solid #666; }
+    .pdot.b { background:#111; } .pdot.w { background:#fafafa; }
+
+    #board-wrap { width: 100%; max-width: 640px; padding: 0 12px; }
+    #board { width: 100%; height: auto; display: block; border-radius: 8px; }
+
+    #status { max-width: 640px; width: 100%; text-align: center; padding: 10px; color: var(--dim); font-variant-numeric: tabular-nums; }
+    #status b { color: var(--fg); }
+
+    #controls {
+      width: 100%; max-width: 640px;
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
+      padding: 4px 16px 20px;
+    }
+    button {
+      appearance: none; border: none; cursor: pointer;
+      background: var(--panel); color: var(--fg);
+      font-size: 20px; font-weight: 600;
+      padding: 16px 0; border-radius: 12px;
+      transition: background .12s, transform .06s;
+    }
+    button:active { transform: scale(0.96); background: #3a3a3c; }
+    button:disabled { opacity: 0.32; cursor: default; }
+    button.play { background: var(--accent); color: #000; }
+    .hint { max-width: 640px; width: 100%; text-align: center; color: var(--dim); font-size: 12px; padding: 0 16px 16px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>LiveGo</h1>
+    <span id="live-badge"><span class="dot"></span><span id="live-text">offline</span></span>
+  </header>
+
+  <div id="players">
+    <span><span class="pdot b"></span><b id="p-black">Black</b> <span id="cap-black"></span></span>
+    <span><span id="cap-white"></span><b id="p-white">White</b><span class="pdot w"></span></span>
+  </div>
+
+  <div id="board-wrap"><canvas id="board"></canvas></div>
+
+  <div id="status"><b id="move-label">Move 0</b> / <span id="move-total">0</span> <span id="last-coord"></span></div>
+
+  <div id="controls">
+    <button id="btn-begin" title="Start">⏮</button>
+    <button id="btn-prev"  title="Previous">◀</button>
+    <button id="btn-next"  title="Next">▶</button>
+    <button id="btn-end" class="play" title="Latest / Live">⏭</button>
+  </div>
+  <div class="hint">Arrow keys ← → to step · Space for latest. Auto-plays new moves when you're at the latest.</div>
+
+<script>
+// ── Config ──────────────────────────────────────────────────────────────────────
+const BOARD_SIZE = 19;
+const HOSHI = [3, 9, 15];
+const POLL_MS = 3000;          // how often to check for new moves
+const AUTOPLAY_MS = 900;       // delay between auto-played new moves
+
+// A built-in demo game (IMG_2534). Replace by ?game=<url-to-json> for a real feed.
+// Move format: { c: 1|2 (black|white), y: row, x: col }.
+const DEMO_GAME = {
+  info: { black: 'Black', white: 'White', size: 19 },
+  moves: [
+    {c:1,y:3,x:3},  {c:2,y:15,x:15}, {c:1,y:3,x:15}, {c:2,y:15,x:3},
+    {c:1,y:3,x:9},  {c:2,y:5,x:16},  {c:1,y:5,x:15}, {c:2,y:6,x:15},
+    {c:1,y:5,x:14}, {c:2,y:4,x:17},  {c:1,y:2,x:16}, {c:2,y:6,x:14},
+  ],
+};
+
+// ── State ───────────────────────────────────────────────────────────────────────
+let game = { info: {}, moves: [] };
+let index = 0;            // number of moves shown (0 = empty board)
+let autoplayTimer = null;
+let lastFetchOk = 0;
+
+// ── Go engine: replay moves with capture rules ──────────────────────────────────
+function emptyBoard() {
+  return Array.from({ length: BOARD_SIZE }, () => new Array(BOARD_SIZE).fill(0));
+}
+function neighbors(y, x) {
+  const out = [];
+  if (y > 0) out.push([y - 1, x]);
+  if (y < BOARD_SIZE - 1) out.push([y + 1, x]);
+  if (x > 0) out.push([y, x - 1]);
+  if (x < BOARD_SIZE - 1) out.push([y, x + 1]);
+  return out;
+}
+// Flood-fill a group; return {stones:[[y,x]...], libs:count}.
+function groupInfo(board, y, x) {
+  const color = board[y][x];
+  const seen = new Set(), stones = [], libSet = new Set();
+  const stack = [[y, x]]; seen.add(y * BOARD_SIZE + x);
+  while (stack.length) {
+    const [cy, cx] = stack.pop();
+    stones.push([cy, cx]);
+    for (const [ny, nx] of neighbors(cy, cx)) {
+      const v = board[ny][nx];
+      if (v === 0) libSet.add(ny * BOARD_SIZE + nx);
+      else if (v === color && !seen.has(ny * BOARD_SIZE + nx)) {
+        seen.add(ny * BOARD_SIZE + nx); stack.push([ny, nx]);
+      }
+    }
+  }
+  return { stones, libs: libSet.size };
+}
+// Apply one move; remove captured opponent groups. Returns captured [[y,x]...].
+function applyMove(board, color, y, x) {
+  board[y][x] = color;
+  const opp = color === 1 ? 2 : 1;
+  const captured = [];
+  for (const [ny, nx] of neighbors(y, x)) {
+    if (board[ny][nx] === opp) {
+      const g = groupInfo(board, ny, nx);
+      if (g.libs === 0) for (const [gy, gx] of g.stones) { board[gy][gx] = 0; captured.push([gy, gx]); }
+    }
+  }
+  return captured;
+}
+// Board state after `n` moves, plus capture tally and the last move's coords.
+function stateAt(n) {
+  const board = emptyBoard();
+  let capB = 0, capW = 0, last = null;
+  for (let i = 0; i < n && i < game.moves.length; i++) {
+    const m = game.moves[i];
+    const cap = applyMove(board, m.c, m.y, m.x);
+    if (cap.length) { if (m.c === 1) capB += cap.length; else capW += cap.length; }
+    last = m;
+  }
+  return { board, capB, capW, last };
+}
+
+// ── Rendering ───────────────────────────────────────────────────────────────────
+const canvas = document.getElementById('board');
+const ctx = canvas.getContext('2d');
+
+let boardPx = 0;
+function sizeCanvas() {
+  // Base the size on the viewport directly so we don't depend on layout timing.
+  const avail = Math.min(window.innerWidth, 640) - 24; // 12px padding each side
+  const size = Math.max(200, Math.floor(avail));
+  boardPx = size;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.style.width = size + 'px';
+  canvas.style.height = size + 'px';
+  canvas.width = Math.round(size * dpr);
+  canvas.height = Math.round(size * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  render();
+}
+
+function render() {
+  const S = boardPx;
+  if (!S) return; // not sized yet
+  const margin = S * 0.045;
+  const grid = S - 2 * margin;
+  const step = grid / (BOARD_SIZE - 1);
+  const { board, capB, capW, last } = stateAt(index);
+
+  // Wood
+  ctx.fillStyle = '#e3b96b';
+  roundRect(0, 0, S, S, 8); ctx.fill();
+
+  // Lines
+  ctx.strokeStyle = 'rgba(60,40,10,0.85)';
+  ctx.lineWidth = Math.max(1, step * 0.03);
+  ctx.beginPath();
+  for (let i = 0; i < BOARD_SIZE; i++) {
+    const p = margin + i * step;
+    ctx.moveTo(margin, p); ctx.lineTo(margin + grid, p);
+    ctx.moveTo(p, margin); ctx.lineTo(p, margin + grid);
+  }
+  ctx.stroke();
+
+  // Star points
+  ctx.fillStyle = 'rgba(60,40,10,0.9)';
+  for (const r of HOSHI) for (const c of HOSHI) {
+    ctx.beginPath();
+    ctx.arc(margin + c * step, margin + r * step, Math.max(2, step * 0.09), 0, 7);
+    ctx.fill();
+  }
+
+  // Stones
+  const sr = step * 0.47;
+  for (let y = 0; y < BOARD_SIZE; y++) for (let x = 0; x < BOARD_SIZE; x++) {
+    const v = board[y][x];
+    if (!v) continue;
+    const px = margin + x * step, py = margin + y * step;
+    const g = ctx.createRadialGradient(px - sr*0.35, py - sr*0.35, sr*0.1, px, py, sr);
+    if (v === 1) { g.addColorStop(0,'#666'); g.addColorStop(1,'#0a0a0a'); }
+    else         { g.addColorStop(0,'#fff'); g.addColorStop(1,'#cfcfcf'); }
+    ctx.beginPath(); ctx.arc(px, py, sr, 0, 7); ctx.fillStyle = g; ctx.fill();
+    ctx.strokeStyle = v === 1 ? '#000' : '#aaa'; ctx.lineWidth = 0.5; ctx.stroke();
+  }
+
+  // Last-move marker
+  if (last) {
+    const px = margin + last.x * step, py = margin + last.y * step;
+    ctx.beginPath(); ctx.arc(px, py, sr * 0.35, 0, 7);
+    ctx.strokeStyle = last.c === 1 ? '#fff' : '#d00'; ctx.lineWidth = Math.max(1.5, step*0.05); ctx.stroke();
+  }
+
+  // Labels
+  document.getElementById('move-label').textContent = 'Move ' + index;
+  document.getElementById('move-total').textContent = game.moves.length;
+  document.getElementById('last-coord').textContent = last ? '· ' + coordLabel(last) : '';
+  document.getElementById('cap-black').textContent = capB ? `+${capB}` : '';
+  document.getElementById('cap-white').textContent = capW ? `+${capW}` : '';
+  updateButtons();
+}
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+}
+const COLS = 'ABCDEFGHJKLMNOPQRST'; // Go skips 'I'
+function coordLabel(m) {
+  return (m.c === 1 ? 'B ' : 'W ') + COLS[m.x] + (BOARD_SIZE - m.y);
+}
+
+// ── Navigation ──────────────────────────────────────────────────────────────────
+function isAtEnd() { return index >= game.moves.length; }
+function goto(i) {
+  index = Math.max(0, Math.min(game.moves.length, i));
+  stopAutoplay();
+  render();
+}
+function updateButtons() {
+  document.getElementById('btn-begin').disabled = index === 0;
+  document.getElementById('btn-prev').disabled  = index === 0;
+  document.getElementById('btn-next').disabled  = isAtEnd();
+  document.getElementById('btn-end').disabled   = isAtEnd() && !autoplayTimer;
+}
+document.getElementById('btn-begin').onclick = () => goto(0);
+document.getElementById('btn-prev').onclick  = () => goto(index - 1);
+document.getElementById('btn-next').onclick  = () => goto(index + 1);
+document.getElementById('btn-end').onclick   = () => goto(game.moves.length);
+window.addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft') goto(index - 1);
+  else if (e.key === 'ArrowRight') goto(index + 1);
+  else if (e.key === 'Home') goto(0);
+  else if (e.key === 'End' || e.key === ' ') goto(game.moves.length);
+});
+
+// ── Autoplay of newly-arrived moves ─────────────────────────────────────────────
+function stopAutoplay() { if (autoplayTimer) { clearTimeout(autoplayTimer); autoplayTimer = null; } }
+function autoplayTo(target) {
+  stopAutoplay();
+  const step = () => {
+    if (index >= target) { autoplayTimer = null; render(); return; }
+    index++;
+    render();
+    autoplayTimer = setTimeout(step, AUTOPLAY_MS);
+  };
+  step();
+}
+
+// ── Data source (transport-agnostic) ────────────────────────────────────────────
+// For now: ?game=<url> to a JSON feed, else the built-in demo. Later this becomes
+// a GitHub raw-file poll. Returns a game object or null on failure.
+async function fetchGame() {
+  const url = new URLSearchParams(location.search).get('game');
+  if (!url) return DEMO_GAME;
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return await res.json();
+}
+
+let loadedOnce = false;
+function applyGame(next) {
+  const wasAtEnd = isAtEnd();
+  const prevLen = game.moves.length;
+  game = next || { info: {}, moves: [] };
+  document.getElementById('p-black').textContent = game.info?.black || 'Black';
+  document.getElementById('p-white').textContent = game.info?.white || 'White';
+
+  if (!loadedOnce) {                          // first load → jump straight to the latest position
+    loadedOnce = true;
+    index = game.moves.length;
+    render();
+    return;
+  }
+  if (game.moves.length < prevLen) { index = Math.min(index, game.moves.length); render(); return; } // reset/rewind
+  if (wasAtEnd && game.moves.length > prevLen) autoplayTo(game.moves.length); // play new moves
+  else render();
+}
+
+async function poll() {
+  try {
+    const g = await fetchGame();
+    lastFetchOk = Date.now();
+    setLive(true);
+    applyGame(g);
+  } catch (e) {
+    setLive(false);
+    console.warn('poll failed:', e.message);
+  }
+  setTimeout(poll, POLL_MS);
+}
+function setLive(ok) {
+  const b = document.getElementById('live-badge');
+  const t = document.getElementById('live-text');
+  const usingFeed = new URLSearchParams(location.search).has('game');
+  if (!usingFeed) { b.classList.remove('live'); t.textContent = 'demo'; return; }
+  b.classList.toggle('live', ok);
+  t.textContent = ok ? 'LIVE' : 'reconnecting…';
+}
+
+// ── Boot ─────────────────────────────────────────────────────────────────────────
+window.addEventListener('resize', sizeCanvas);
+window.addEventListener('load', sizeCanvas);          // re-size once layout is final
+sizeCanvas();                                         // initial size (viewport-based)
+applyGame(DEMO_GAME);                                 // show demo immediately
+requestAnimationFrame(sizeCanvas);                    // and once more after first paint
+poll();
+</script>
+</body>
+</html>

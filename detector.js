@@ -78,6 +78,21 @@ class BoardDetector {
     this._baselineGray = null;             // full warped gray of the empty board (for occlusion)
     this._colPos       = null;             // fitted grid line x-positions (in warp px)
     this._rowPos       = null;             // fitted grid line y-positions
+
+    // ── Debug capture ──
+    this.debug = {
+      enabled: true,
+      t0:      Date.now(),
+      frameNo: 0,
+      frames:  [],   // per-frame records (ring buffer)
+      images:  [],   // warped-board JPEGs at key moments (ring buffer)
+      maxFrames: 500,
+      maxImages: 30,
+      last:    { ev: '-', motion: 0, occ: false, amb: 0 }, // for the live HUD
+    };
+    this._dbgPending = null;  // frame data staged in _detectState, finalized in _reconcile
+    this._dbgDeltas  = null;  // 19×19 delta grid this frame
+    this._dbgCanvas  = null;  // offscreen canvas for image snapshots
   }
 
   start() {
@@ -101,6 +116,7 @@ class BoardDetector {
   _tick() {
     if (!this.running) return;
     try {
+      this.debug.frameNo++;
       const newState = this._detectState();
       if (newState) {
         this._reconcile(newState);
@@ -179,6 +195,24 @@ class BoardDetector {
       for (let c = 0; c < BOARD_SIZE; c++) row.push(this._classifyIntersection(r, c));
       state.push(row);
     }
+
+    // Stage this frame's debug data (finalized with an event in _reconcile).
+    if (this.debug.enabled) {
+      const dg = new Array(BOARD_SIZE * BOARD_SIZE);
+      for (let i = 0; i < deltas.length; i++) dg[i] = Math.round(deltas[i] - this._ambient);
+      this._dbgDeltas = dg;
+      this._dbgPending = {
+        i: this.debug.frameNo,
+        t: Date.now() - this.debug.t0,
+        motion: +this._motion.toFixed(3),
+        occ: this._occluded,
+        occBlob: this._occBlob,
+        amb: +this._ambient.toFixed(1),
+        deltas: dg,
+        state: flatten(state),
+      };
+    }
+
     return state;
   }
 
@@ -317,6 +351,7 @@ class BoardDetector {
   }
 
   _reconcile(rawState) {
+    let event = 'idle';
     // Only diff VALID frames — static (no motion) AND unoccluded (no hand/arm
     // over the board). An invalid frame's readings can't be trusted, so we skip
     // it entirely. When the board next becomes visible and settled, the diff
@@ -324,6 +359,7 @@ class BoardDetector {
     if (this._motion > MOTION_THRESH || this._occluded) {
       this.pendingState = null;
       this.pendingCount = 0;
+      this._dbgFlush(this._occluded ? 'skip-occluded' : 'skip-motion');
       return;
     }
 
@@ -339,6 +375,7 @@ class BoardDetector {
     if (diff.length === 0) {
       this.pendingState = null;
       this.pendingCount = 0;
+      this._dbgFlush('stable');
       return;
     }
 
@@ -349,19 +386,86 @@ class BoardDetector {
       this.pendingCount = 1;
     }
 
+    event = 'pending';
     // Board has settled to a new stable state → commit after a couple of quiet
     // frames (guards against a single noisy sample).
     if (this.pendingCount >= QUIET_FRAMES) {
       if (this._alternationOK(diff)) {
         this._commitState(newState, diff);
+        event = 'commit';
+      } else {
+        // change violates alternation/turn parity (false white from lighting, or a
+        // lone wrong-colour stone) → skip; record nothing, state/baseline untouched.
+        event = 'reject-alternation';
       }
-      // else: change violates alternation (a swath of false white from a lighting
-      // shift) → skip; record nothing, leave state/baseline untouched.
       this.pendingState = null;
       this.pendingCount = 0;
     }
 
     this._bumpAge();
+    this._dbgFlush(event, diff);
+  }
+
+  // ── Debug capture ──────────────────────────────────────────────────────────
+
+  // Finalize the staged frame with an event and push to the ring buffers.
+  _dbgFlush(event, diff) {
+    if (!this.debug.enabled) return;
+    const nB = countColor(this.boardState, STONE.BLACK);
+    const nW = countColor(this.boardState, STONE.WHITE);
+    this.debug.last = { ev: event, motion: this._motion, occ: this._occluded, amb: this._ambient, nB, nW };
+
+    const f = this._dbgPending;
+    if (!f) return;
+    f.ev = event;
+    f.nB = nB; f.nW = nW;
+    f.board = flatten(this.boardState);
+    if (diff && diff.length) {
+      f.diff = diff.map(d => [d.row, d.col, d.from, d.to]);
+    }
+    this.debug.frames.push(f);
+    if (this.debug.frames.length > this.debug.maxFrames) this.debug.frames.shift();
+
+    // Snapshot the warped board at decision points (commit / reject / occlusion).
+    if (event === 'commit' || event === 'reject-alternation' ||
+        (event === 'skip-occluded' && this.debug.images.length < 4)) {
+      this._dbgSnapshotImage(f.i, event);
+    }
+    this._dbgPending = null;
+  }
+
+  _dbgSnapshotImage(frameIdx, event) {
+    try {
+      if (!this._dbgCanvas) this._dbgCanvas = document.createElement('canvas');
+      cv.imshow(this._dbgCanvas, this._warped);   // full warped board
+      // Downscale to keep the export small.
+      const small = document.createElement('canvas');
+      small.width = 240; small.height = 240;
+      small.getContext('2d').drawImage(this._dbgCanvas, 0, 0, 240, 240);
+      this.debug.images.push({ i: frameIdx, ev: event, data: small.toDataURL('image/jpeg', 0.5) });
+      if (this.debug.images.length > this.debug.maxImages) this.debug.images.shift();
+    } catch (e) { /* imshow can fail if mats are freed mid-teardown */ }
+  }
+
+  // Assemble the full debug bundle as a JSON string for export.
+  getDebugJSON() {
+    return JSON.stringify({
+      meta: {
+        version: 'v20',
+        savedAt: new Date().toISOString(),
+        vid: { w: this.displayMeta?.vidW, h: this.displayMeta?.vidH },
+        disp: { w: this.displayMeta?.dispW, h: this.displayMeta?.dispH },
+        corners: this.corners,
+        warpSize: WARP_SIZE,
+        grid: { col: this._colPos, row: this._rowPos },
+        baseline: this._baseline ? this._baseline.map(r => r.map(v => Math.round(v))) : null,
+        thresholds: { whiteDelta: WHITE_DELTA, blackDelta: BLACK_DELTA, motion: MOTION_THRESH, ageProtect: AGE_PROTECT },
+        finalBoard: flatten(this.boardState),
+        frameCount: this.debug.frameNo,
+      },
+      frames: this.debug.frames,
+      images: this.debug.images,
+    });
   }
 
   // Each valid frame: occupied points age up, empty points reset. Age gates which
@@ -627,6 +731,15 @@ function statesEqual(a, b) {
     for (let c = 0; c < BOARD_SIZE; c++)
       if (a[r][c] !== b[r][c]) return false;
   return true;
+}
+
+// Flatten a 19×19 board to a single 361-length array (for compact debug JSON).
+function flatten(board) {
+  const out = new Array(BOARD_SIZE * BOARD_SIZE);
+  for (let r = 0; r < BOARD_SIZE; r++)
+    for (let c = 0; c < BOARD_SIZE; c++)
+      out[r * BOARD_SIZE + c] = board[r][c];
+  return out;
 }
 
 // Does the stone group containing (r,c) have at least one liberty (empty
