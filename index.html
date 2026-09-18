@@ -6,7 +6,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-fullscreen">
   <title>LiveGo</title>
-  <link rel="stylesheet" href="style.css?v=23">
+  <link rel="stylesheet" href="style.css?v=24">
 </head>
 <body>
 
@@ -69,16 +69,23 @@
         <button id="btn-export" class="btn primary">Export SGF</button>
       </div>
       <div id="record-buttons">
+        <button id="btn-live" class="btn secondary">Go Live</button>
         <button id="btn-debug-toggle" class="btn ghost">Debug HUD</button>
         <button id="btn-debug-export" class="btn ghost">Export Debug Log</button>
+      </div>
+      <div id="live-panel" class="hidden">
+        <span id="live-status">● LIVE</span>
+        <span id="live-link"></span>
+        <button id="btn-live-copy" class="btn ghost">Copy viewer link</button>
       </div>
     </div>
   </div>
 
   <script src="opencv.js"></script>
-  <script src="corners.js?v=23"></script>
-  <script src="detector.js?v=23"></script>
-  <script src="sgf.js?v=23"></script>
-  <script src="app.js?v=23"></script>
+  <script src="live.js?v=24"></script>
+  <script src="corners.js?v=24"></script>
+  <script src="detector.js?v=24"></script>
+  <script src="sgf.js?v=24"></script>
+  <script src="app.js?v=24"></script>
 </body>
 </html>

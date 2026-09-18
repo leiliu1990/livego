@@ -89,6 +89,7 @@
   </div>
   <div class="hint">Arrow keys ← → to step · Space for latest. Auto-plays new moves when you're at the latest.</div>
 
+<script src="live.js?v=24"></script>
 <script>
 // ── Config ──────────────────────────────────────────────────────────────────────
 const BOARD_SIZE = 19;
@@ -294,11 +295,18 @@ function autoplayTo(target) {
   step();
 }
 
-// ── Data source (transport-agnostic) ────────────────────────────────────────────
-// For now: ?game=<url> to a JSON feed, else the built-in demo. Later this becomes
-// a GitHub raw-file poll. Returns a game object or null on failure.
+// ── Data source ─────────────────────────────────────────────────────────────────
+// ?id=<gameId>   → live Firebase feed (via live.js)
+// ?game=<url>    → an explicit JSON URL
+// neither        → the built-in demo game
 async function fetchGame() {
-  const url = new URLSearchParams(location.search).get('game');
+  const params = new URLSearchParams(location.search);
+  const id = params.get('id');
+  if (id) {
+    const g = await liveFetch(id);      // from live.js
+    return g || { info: {}, moves: [] }; // null = game not created yet
+  }
+  const url = params.get('game');
   if (!url) return DEMO_GAME;
   const res = await fetch(url, { cache: 'no-store' });
   if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -339,7 +347,8 @@ async function poll() {
 function setLive(ok) {
   const b = document.getElementById('live-badge');
   const t = document.getElementById('live-text');
-  const usingFeed = new URLSearchParams(location.search).has('game');
+  const params = new URLSearchParams(location.search);
+  const usingFeed = params.has('game') || params.has('id');
   if (!usingFeed) { b.classList.remove('live'); t.textContent = 'demo'; return; }
   b.classList.toggle('live', ok);
   t.textContent = ok ? 'LIVE' : 'reconnecting…';

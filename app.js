@@ -5,6 +5,8 @@ let recorder        = null;
 let confirmedCorners     = null;
 let confirmedDisplayMeta = null;
 let lastMove             = null; // {row, col, color} — highlighted on the overlay
+let liveGameId           = null; // set when broadcasting; null = offline
+let livePublishTimer     = null;
 
 function onOpenCvReady() {
   if (cvReady) return;
@@ -179,6 +181,72 @@ function startRecording() {
   document.getElementById('btn-export').addEventListener('click', () => { detector?.finalizePending(); recorder.download(); });
   document.getElementById('btn-debug-toggle').addEventListener('click', toggleDebugHUD);
   document.getElementById('btn-debug-export').addEventListener('click', exportDebugLog);
+  document.getElementById('btn-live').addEventListener('click', toggleLive);
+  document.getElementById('btn-live-copy').addEventListener('click', copyViewerLink);
+}
+
+// ── Live broadcast (publisher side) ─────────────────────────────────────────────
+
+function toggleLive() {
+  if (liveGameId) { stopLive(); return; }
+  if (typeof liveConfigured !== 'function' || !liveConfigured()) {
+    alert('Live is not configured yet — the Firebase database URL still needs to be set in live.js.');
+    return;
+  }
+  liveGameId = liveNewGameId();
+  const panel = document.getElementById('live-panel');
+  panel.classList.remove('hidden');
+  panel.classList.add('on');
+  document.getElementById('btn-live').textContent = 'Stop Live';
+  const url = viewerLink();
+  document.getElementById('live-link').textContent = url;
+  publishLiveNow(); // publish current state immediately
+}
+
+function stopLive() {
+  liveGameId = null;
+  const panel = document.getElementById('live-panel');
+  panel.classList.remove('on');
+  panel.classList.add('hidden');
+  document.getElementById('btn-live').textContent = 'Go Live';
+}
+
+function viewerLink() {
+  return `${location.origin}${location.pathname.replace(/index\.html$/, '')}viewer.html?id=${liveGameId}`;
+}
+
+// Build the compact game JSON the viewer expects: {info, moves:[{c,y,x}]}.
+function buildLiveGame() {
+  return {
+    info: { black: recorder.gameInfo.black || 'Black', white: recorder.gameInfo.white || 'White', size: BOARD_SIZE },
+    moves: recorder.moves.map(m => ({ c: m.color, y: m.row, x: m.col })),
+    updated: Date.now(),
+  };
+}
+
+// Debounced publish (coalesce rapid moves into one PUT).
+function publishLive() {
+  if (!liveGameId) return;
+  if (livePublishTimer) clearTimeout(livePublishTimer);
+  livePublishTimer = setTimeout(publishLiveNow, 400);
+}
+async function publishLiveNow() {
+  if (!liveGameId) return;
+  const ok = await livePublish(liveGameId, buildLiveGame());
+  const s = document.getElementById('live-status');
+  if (s) s.textContent = ok ? '● LIVE' : '● reconnecting…';
+}
+
+function copyViewerLink() {
+  if (!liveGameId) return;
+  const url = viewerLink();
+  if (navigator.clipboard) navigator.clipboard.writeText(url).then(() => flashCopied());
+  else { prompt('Viewer link:', url); }
+}
+function flashCopied() {
+  const b = document.getElementById('btn-live-copy');
+  const t = b.textContent; b.textContent = 'Copied ✓';
+  setTimeout(() => b.textContent = t, 1200);
 }
 
 // ── Debug HUD + export ──────────────────────────────────────────────────────────
@@ -234,6 +302,7 @@ function onMoveDetected(moveObj) {
   lastMove = { row: moveObj.row, col: moveObj.col, color: moveObj.color };
   updateRecordUI();
   flashStatus();
+  publishLive(); // broadcast the new move if live
 }
 
 function undoMove() {
