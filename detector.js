@@ -197,21 +197,24 @@ class BoardDetector {
     }
 
     // Stage this frame's debug data (finalized with an event in _reconcile).
-    if (this.debug.enabled) {
-      const dg = new Array(BOARD_SIZE * BOARD_SIZE);
-      for (let i = 0; i < deltas.length; i++) dg[i] = Math.round(deltas[i] - this._ambient);
-      this._dbgDeltas = dg;
-      this._dbgPending = {
-        i: this.debug.frameNo,
-        t: Date.now() - this.debug.t0,
-        motion: +this._motion.toFixed(3),
-        occ: this._occluded,
-        occBlob: this._occBlob,
-        amb: +this._ambient.toFixed(1),
-        deltas: dg,
-        state: flatten(state),
-      };
-    }
+    // Guarded so a debug error never breaks detection.
+    try {
+      if (this.debug.enabled) {
+        const dg = new Array(BOARD_SIZE * BOARD_SIZE);
+        for (let i = 0; i < deltas.length; i++) dg[i] = Math.round(deltas[i] - this._ambient);
+        this._dbgDeltas = dg;
+        this._dbgPending = {
+          i: this.debug.frameNo,
+          t: Date.now() - this.debug.t0,
+          motion: +this._motion.toFixed(3),
+          occ: this._occluded,
+          occBlob: this._occBlob,
+          amb: +this._ambient.toFixed(1),
+          deltas: dg,
+          state: flatten(state),
+        };
+      }
+    } catch (e) { console.warn('debug stage error:', e.message); }
 
     return state;
   }
@@ -409,7 +412,12 @@ class BoardDetector {
   // ── Debug capture ──────────────────────────────────────────────────────────
 
   // Finalize the staged frame with an event and push to the ring buffers.
+  // Wrapped so a debug-capture error can NEVER break detection or the overlay
+  // redraw (a thrown error here previously aborted the frame before onFrame ran).
   _dbgFlush(event, diff) {
+    try { this._dbgFlushInner(event, diff); } catch (e) { console.warn('debug flush error:', e.message); }
+  }
+  _dbgFlushInner(event, diff) {
     if (!this.debug.enabled) return;
     const nB = countColor(this.boardState, STONE.BLACK);
     const nW = countColor(this.boardState, STONE.WHITE);
