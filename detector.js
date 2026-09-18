@@ -36,6 +36,12 @@ const OCC_BLOB_MIN = Math.round(4 * Math.PI * STONE_RADIUS * STONE_RADIUS); // b
 const WHITE_DELTA = 18;   // ≥ this brightening vs empty ⇒ white stone
 const BLACK_DELTA = -70;  // ≤ this darkening  vs empty ⇒ black stone
 
+// A stone is "mature" after surviving this many valid frames. Mature stones are
+// protected from false disappearance (Go rules: only leave by capture); younger
+// ones may still vanish, letting a transient false positive (a hand/stone briefly
+// resting on a point, committed before it moved on) self-heal.
+const AGE_PROTECT = 4;
+
 class BoardDetector {
   // displayMeta: { vidW, vidH, dispW, dispH } captured at corner-pick time
   // onFrame(boardState): called after every sample (for UI overlay)
@@ -50,7 +56,9 @@ class BoardDetector {
     this.pendingState = null;
     this.pendingCount = 0;
     this.running      = false;
-    this._lastColor   = null; // color of the last committed move (for batch ordering)
+    this._lastColor      = null;  // color of the last committed move (for batch ordering + turn parity)
+    this._committedWhite = false; // has any white been committed? (activates the alternation rule)
+    this._age            = Array.from({ length: BOARD_SIZE }, () => new Array(BOARD_SIZE).fill(0)); // valid-frames a stone has survived
 
     this._src    = null;
     this._warped = null;
@@ -308,7 +316,7 @@ class BoardDetector {
     return STONE.EMPTY;
   }
 
-  _reconcile(newState) {
+  _reconcile(rawState) {
     // Only diff VALID frames — static (no motion) AND unoccluded (no hand/arm
     // over the board). An invalid frame's readings can't be trusted, so we skip
     // it entirely. When the board next becomes visible and settled, the diff
@@ -318,6 +326,13 @@ class BoardDetector {
       this.pendingCount = 0;
       return;
     }
+
+    // Undo false disappearances before anything else: a confirmed stone that
+    // reads empty but whose group still has a liberty was not captured (shadow /
+    // partial occlusion dimmed it). Restore it so a real placement in the SAME
+    // frame is still processed, and so the stone never triggers a phantom
+    // removal that a later reappearance can't undo.
+    const newState = this._restoreFalseRemovals(rawState);
 
     const diff = diffStates(this.boardState, newState);
 
@@ -340,30 +355,86 @@ class BoardDetector {
       if (this._alternationOK(diff)) {
         this._commitState(newState, diff);
       }
-      // else: change violates alternation (e.g. a swath of false white from a
-      // lighting shift) → skip this frame; record nothing, leave state/baseline.
+      // else: change violates alternation (a swath of false white from a lighting
+      // shift) → skip; record nothing, leave state/baseline untouched.
       this.pendingState = null;
       this.pendingCount = 0;
     }
+
+    this._bumpAge();
   }
 
-  // Go alternates B/W, so between two valid frames the net new stones must be
-  // colour-balanced (|black - white| ≤ 1). A burst of same-colour stones — what a
-  // lighting shift produces as a field of false white — can't be real play.
+  // Each valid frame: occupied points age up, empty points reset. Age gates which
+  // stones are "mature" enough to be protected from false disappearance.
+  _bumpAge() {
+    for (let r = 0; r < BOARD_SIZE; r++)
+      for (let c = 0; c < BOARD_SIZE; c++)
+        this._age[r][c] = this.boardState[r][c] !== STONE.EMPTY ? this._age[r][c] + 1 : 0;
+  }
+
+  // Return a copy of the detected state with FALSE disappearances undone. A stone
+  // only leaves the board by capture: its group must be fully surrounded (no
+  // liberties) once the capturing move is on the board. A stone that reads empty
+  // while its group still has an empty neighbour was NOT captured — it's a false
+  // disappearance (shadow / partial occlusion dimmed a real stone below
+  // threshold). We restore only those; genuine captures (liberty-less groups) are
+  // left removed, so real play still updates the board.
+  _restoreFalseRemovals(rawState) {
+    const removed = [];
+    for (let r = 0; r < BOARD_SIZE; r++)
+      for (let c = 0; c < BOARD_SIZE; c++)
+        if (this.boardState[r][c] !== STONE.EMPTY && rawState[r][c] === STONE.EMPTY)
+          removed.push({ r, c });
+    if (removed.length === 0) return rawState;
+
+    // Position before any capture is resolved: prev board + newly-placed stones,
+    // with the vanished stones still present (they're already in boardState).
+    const test = this.boardState.map(row => [...row]);
+    for (let r = 0; r < BOARD_SIZE; r++)
+      for (let c = 0; c < BOARD_SIZE; c++)
+        if (this.boardState[r][c] === STONE.EMPTY && rawState[r][c] !== STONE.EMPTY)
+          test[r][c] = rawState[r][c];
+
+    const corrected = rawState.map(row => [...row]);
+    for (const { r, c } of removed) {
+      // Only protect MATURE stones. A young stone that vanishes was likely a
+      // transient false positive → let it go (self-heal). A mature stone with a
+      // liberty was not captured → restore it.
+      if (this._age[r][c] >= AGE_PROTECT && groupHasLiberty(test, r, c)) {
+        corrected[r][c] = this.boardState[r][c];
+      }
+    }
+    return corrected;
+  }
+
+  // Go alternates B/W. Two checks reject changes that can't be real play:
   //
-  // Black plays first, so before any white appears we allow any number of new
-  // black stones (a handicap setup places several black stones up front). The
-  // rule ACTIVATES the moment white appears — including that first white move
-  // itself, which must be balanced (1 white, or 1 black + 1 white if a sample
-  // was skipped). This is what stops a sudden field of false white from ever
-  // being recorded.
+  //  1. Colour balance: between two valid frames the net new stones must satisfy
+  //     |black − white| ≤ 1. A field of same-colour false stones (white from a
+  //     lighting shift) fails this.
+  //  2. Turn parity: once white has appeared, a SINGLE new stone must be the
+  //     colour whose turn it is — the opposite of the last committed move. This
+  //     catches a lone false stone of the wrong colour (a hand/stone briefly
+  //     resting on a point during the opponent's turn) at commit time, before it
+  //     is ever recorded.
+  //
+  // Black plays first, so before any white appears any number of new black stones
+  // is allowed (handicap setup). The rules activate the moment white appears —
+  // the first white move itself must be balanced.
   _alternationOK(diff) {
     const placed = diff.filter(d => d.from === STONE.EMPTY && d.to !== STONE.EMPTY);
     const nb = placed.filter(d => d.to === STONE.BLACK).length;
     const nw = placed.filter(d => d.to === STONE.WHITE).length;
-    const boardHasWhite = this.boardState.some(row => row.some(v => v === STONE.WHITE));
-    if (!boardHasWhite && nw === 0) return true; // pre-activation: black handicap/opening
-    return Math.abs(nb - nw) <= 1;
+
+    if (!this._committedWhite && nw === 0) return true; // pre-activation: black opening/handicap
+    if (Math.abs(nb - nw) > 1) return false;            // colour balance
+
+    if (this._committedWhite && (nb + nw) === 1) {       // turn parity for a single stone
+      const stoneColor = nb === 1 ? STONE.BLACK : STONE.WHITE;
+      const expected   = this._lastColor === STONE.BLACK ? STONE.WHITE : STONE.BLACK;
+      if (stoneColor !== expected) return false;
+    }
+    return true;
   }
 
   _commitState(newState, diff) {
@@ -391,6 +462,7 @@ class BoardDetector {
         prevBoard: i === 0 ? prev : null,
       });
       this._lastColor = p.to;
+      if (p.to === STONE.WHITE) this._committedWhite = true; // activates the alternation rule
     });
   }
 
@@ -555,4 +627,32 @@ function statesEqual(a, b) {
     for (let c = 0; c < BOARD_SIZE; c++)
       if (a[r][c] !== b[r][c]) return false;
   return true;
+}
+
+// Does the stone group containing (r,c) have at least one liberty (empty
+// adjacent point)? Flood-fills the connected same-colour group; returns true as
+// soon as any group stone touches an empty point. Used to tell a real capture
+// (no liberties) from a false disappearance (still has a liberty).
+function groupHasLiberty(board, r, c) {
+  const color = board[r][c];
+  if (color === STONE.EMPTY) return true;
+  const seen = new Set();
+  const stack = [[r, c]];
+  const key = (y, x) => y * BOARD_SIZE + x;
+  seen.add(key(r, c));
+  const nbrs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+  while (stack.length) {
+    const [y, x] = stack.pop();
+    for (const [dy, dx] of nbrs) {
+      const ny = y + dy, nx = x + dx;
+      if (ny < 0 || nx < 0 || ny >= BOARD_SIZE || nx >= BOARD_SIZE) continue;
+      const v = board[ny][nx];
+      if (v === STONE.EMPTY) return true;           // a liberty
+      if (v === color && !seen.has(key(ny, nx))) {  // same-colour neighbour → extend group
+        seen.add(key(ny, nx));
+        stack.push([ny, nx]);
+      }
+    }
+  }
+  return false;
 }
