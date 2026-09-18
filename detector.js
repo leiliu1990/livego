@@ -733,6 +733,15 @@ function statesEqual(a, b) {
   return true;
 }
 
+// Count stones of a given colour on a 19×19 board.
+function countColor(board, color) {
+  let n = 0;
+  for (let r = 0; r < BOARD_SIZE; r++)
+    for (let c = 0; c < BOARD_SIZE; c++)
+      if (board[r][c] === color) n++;
+  return n;
+}
+
 // Flatten a 19×19 board to a single 361-length array (for compact debug JSON).
 function flatten(board) {
   const out = new Array(BOARD_SIZE * BOARD_SIZE);
