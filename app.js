@@ -176,7 +176,7 @@ function startRecording() {
 
   document.getElementById('btn-undo-move').addEventListener('click', undoMove);
   document.getElementById('btn-recalibrate').addEventListener('click', recalibrate);
-  document.getElementById('btn-export').addEventListener('click', () => recorder.download());
+  document.getElementById('btn-export').addEventListener('click', () => { detector?.finalizePending(); recorder.download(); });
   document.getElementById('btn-debug-toggle').addEventListener('click', toggleDebugHUD);
   document.getElementById('btn-debug-export').addEventListener('click', exportDebugLog);
 }
@@ -349,6 +349,24 @@ function drawBoardOverlay(canvas, boardState) {
       ctx.lineWidth   = 0.6;
       ctx.stroke();
     }
+  }
+
+  // Mark TENTATIVE stones (detected but not yet confirmed to the SGF) with a
+  // dashed yellow ring, so it's clear which stones are still awaiting the
+  // opponent's reply to be finalized.
+  const tent = detector && detector._tentative;
+  if (tent) {
+    ctx.strokeStyle = '#ffd60a';
+    ctx.lineWidth   = Math.max(1, STEP * 0.06);
+    ctx.setLineDash([STEP * 0.14, STEP * 0.12]);
+    for (const key in tent) {
+      const [r, c] = key.split(',').map(Number);
+      const px = x0 + MARGIN + c * STEP, py = y0 + MARGIN + r * STEP;
+      ctx.beginPath();
+      ctx.arc(px, py, SR * 0.95, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
   }
 
   // Mark the latest move with a red dot (only if that stone is still present).

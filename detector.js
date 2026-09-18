@@ -56,9 +56,21 @@ class BoardDetector {
     this.pendingState = null;
     this.pendingCount = 0;
     this.running      = false;
-    this._lastColor      = null;  // color of the last committed move (for batch ordering + turn parity)
-    this._committedWhite = false; // has any white been committed? (activates the alternation rule)
+    this._lastColor      = null;  // color of the last confirmed move
+    this._committedWhite = false; // has any white been confirmed?
     this._age            = Array.from({ length: BOARD_SIZE }, () => new Array(BOARD_SIZE).fill(0)); // valid-frames a stone has survived
+
+    // ── Tentative-confirm model ──
+    // A detected move stays TENTATIVE until the opponent's reply confirms it.
+    // this.boardState is the live DISPLAY (confirmed + tentative); this._confirmed
+    // is only what's been emitted to the SGF. Competing same-colour candidates for
+    // one turn are held until one survives / the opponent forces a pick.
+    this._confirmed = Array.from({ length: BOARD_SIZE }, () => new Array(BOARD_SIZE).fill(STONE.EMPTY));
+    this._turn      = STONE.BLACK; // colour we're waiting to confirm next
+    this._activated = false;       // has the first white appeared? (before: black handicap/opening)
+    this._rejected  = {};          // "r,c" -> colour: losing candidates to ignore while unchanged
+    this._tentative = {};          // "r,c" -> colour: detected-but-unconfirmed, for overlay marking
+    this._deltaGrid = null;        // 19×19 post-ambient deltas this frame (for stone-likeness)
 
     this._src    = null;
     this._warped = null;
@@ -103,6 +115,19 @@ class BoardDetector {
   stop() {
     this.running = false;
     this._freeMats();
+  }
+
+  // Confirm the last still-tentative move — call before exporting the SGF at game
+  // end, since a move is normally only confirmed when the opponent replies.
+  finalizePending() {
+    const pend = [];
+    for (let r = 0; r < BOARD_SIZE; r++)
+      for (let c = 0; c < BOARD_SIZE; c++)
+        if (this.boardState[r][c] !== STONE.EMPTY && this._confirmed[r][c] === STONE.EMPTY &&
+            this._rejected[r + ',' + c] !== this.boardState[r][c])
+          pend.push({ r, c, color: this.boardState[r][c] });
+    const mine = pend.filter(p => p.color === this._turn);
+    if (mine.length >= 1) this._confirmMove(mine.length === 1 ? mine[0] : this._mostStoneLike(mine));
   }
 
   undoLastMove(previousState) {
@@ -188,6 +213,10 @@ class BoardDetector {
         deltas.push(sampleMean(this._gray, x, y, STONE_RADIUS) - this._baseline[r][c]);
       }
     this._ambient = medianOf(deltas);
+
+    // Post-ambient delta grid, kept for candidate stone-likeness comparison.
+    this._deltaGrid = new Array(BOARD_SIZE * BOARD_SIZE);
+    for (let i = 0; i < deltas.length; i++) this._deltaGrid[i] = deltas[i] - this._ambient;
 
     const state = [];
     for (let r = 0; r < BOARD_SIZE; r++) {
@@ -390,23 +419,104 @@ class BoardDetector {
     }
 
     event = 'pending';
-    // Board has settled to a new stable state → commit after a couple of quiet
-    // frames (guards against a single noisy sample).
+    // Board has settled to a new stable state → update the DISPLAY board and run
+    // the tentative-confirm resolver (which decides what to emit to the SGF).
     if (this.pendingCount >= QUIET_FRAMES) {
-      if (this._alternationOK(diff)) {
-        this._commitState(newState, diff);
-        event = 'commit';
-      } else {
-        // change violates alternation/turn parity (false white from lighting, or a
-        // lone wrong-colour stone) → skip; record nothing, state/baseline untouched.
-        event = 'reject-alternation';
-      }
+      this.boardState = newState.map(r => [...r]);
+      const emitted = this._resolveTentative(newState);
+      event = emitted > 0 ? 'commit' : 'tentative';
       this.pendingState = null;
       this.pendingCount = 0;
     }
 
     this._bumpAge();
     this._dbgFlush(event, diff);
+  }
+
+  // ── Tentative-confirm resolver ──────────────────────────────────────────────
+  // Given the stable DISPLAY board S, decide which moves are now confirmed.
+  // Rules: a move is tentative until the opponent replies; competing same-colour
+  // candidates are held until one survives (rule: alive-only) or the opponent
+  // forces a pick (rule: most stone-like). Returns the number of moves emitted.
+  _resolveTentative(S) {
+    // Clear rejected marks whose cell no longer holds that colour (shadow faded).
+    for (const key in this._rejected) {
+      const [r, c] = key.split(',').map(Number);
+      if (S[r][c] !== this._rejected[key]) delete this._rejected[key];
+    }
+
+    let emitted = 0, guard = 0;
+    while (guard++ < 12) {
+      // Stones detected but not yet confirmed, excluding rejected losers.
+      const added = [];
+      for (let r = 0; r < BOARD_SIZE; r++)
+        for (let c = 0; c < BOARD_SIZE; c++) {
+          const v = S[r][c];
+          if (v !== STONE.EMPTY && this._confirmed[r][c] === STONE.EMPTY && this._rejected[r + ',' + c] !== v)
+            added.push({ r, c, color: v });
+        }
+      const mine = added.filter(a => a.color === this._turn);
+      const opp  = added.filter(a => a.color !== this._turn);
+
+      if (!this._activated) {
+        // Pre-activation: black opening/handicap. Wait until white appears, then
+        // confirm ALL alive black candidates (they are all real), and activate.
+        if (opp.length === 0) break;
+        for (const m of mine) { this._confirmMove(m); emitted++; }
+        this._activated = true;
+        this._turn = STONE.WHITE;
+        continue; // the white(s) are now the current turn's candidates
+      }
+
+      // Activated: only confirm the current turn when the opponent has replied.
+      if (opp.length === 0) break;            // no reply yet → keep waiting (tentative)
+      if (mine.length === 0) { this._turn = other(this._turn); continue; } // turn had no real stone
+
+      const chosen = mine.length === 1 ? mine[0] : this._mostStoneLike(mine);
+      for (const m of mine) if (m !== chosen) this._rejected[m.r + ',' + m.c] = m.color; // reject losers
+      this._confirmMove(chosen);
+      emitted++;
+      this._turn = other(this._turn);
+    }
+
+    // Publish the tentative set (detected but unconfirmed) for the overlay.
+    this._tentative = {};
+    for (let r = 0; r < BOARD_SIZE; r++)
+      for (let c = 0; c < BOARD_SIZE; c++)
+        if (S[r][c] !== STONE.EMPTY && this._confirmed[r][c] === STONE.EMPTY)
+          this._tentative[r + ',' + c] = S[r][c];
+
+    return emitted;
+  }
+
+  // Confirm one move: apply to the confirmed board with captures, emit onMove.
+  _confirmMove(m) {
+    const captured = applyMoveCapture(this._confirmed, m.color, m.r, m.c);
+    this.onMove({
+      row: m.r, col: m.c, color: m.color,
+      captures: captured.map(([r, c]) => ({ row: r, col: c })),
+      prevBoard: null,
+    });
+    this._lastColor = m.color;
+    if (m.color === STONE.WHITE) this._committedWhite = true;
+  }
+
+  // Among competing same-colour candidates, pick the one whose brightness delta
+  // is closest to confirmed stones of that colour (adaptive stone-likeness).
+  _mostStoneLike(cands) {
+    const color = cands[0].color;
+    const refs = [];
+    for (let r = 0; r < BOARD_SIZE; r++)
+      for (let c = 0; c < BOARD_SIZE; c++)
+        if (this._confirmed[r][c] === color) refs.push(this._deltaGrid[r * BOARD_SIZE + c]);
+    const ref = refs.length ? medianOf(refs) : (color === STONE.BLACK ? BLACK_DELTA * 1.6 : WHITE_DELTA * 3);
+    let best = cands[0], bestDiff = Infinity;
+    for (const m of cands) {
+      const d = this._deltaGrid[m.r * BOARD_SIZE + m.c];
+      const diff = Math.abs(d - ref);
+      if (diff < bestDiff) { bestDiff = diff; best = m; }
+    }
+    return best;
   }
 
   // ── Debug capture ──────────────────────────────────────────────────────────
@@ -519,64 +629,6 @@ class BoardDetector {
     return corrected;
   }
 
-  // Go alternates B/W. Two checks reject changes that can't be real play:
-  //
-  //  1. Colour balance: between two valid frames the net new stones must satisfy
-  //     |black − white| ≤ 1. A field of same-colour false stones (white from a
-  //     lighting shift) fails this.
-  //  2. Turn parity: once white has appeared, a SINGLE new stone must be the
-  //     colour whose turn it is — the opposite of the last committed move. This
-  //     catches a lone false stone of the wrong colour (a hand/stone briefly
-  //     resting on a point during the opponent's turn) at commit time, before it
-  //     is ever recorded.
-  //
-  // Black plays first, so before any white appears any number of new black stones
-  // is allowed (handicap setup). The rules activate the moment white appears —
-  // the first white move itself must be balanced.
-  _alternationOK(diff) {
-    const placed = diff.filter(d => d.from === STONE.EMPTY && d.to !== STONE.EMPTY);
-    const nb = placed.filter(d => d.to === STONE.BLACK).length;
-    const nw = placed.filter(d => d.to === STONE.WHITE).length;
-
-    if (!this._committedWhite && nw === 0) return true; // pre-activation: black opening/handicap
-    if (Math.abs(nb - nw) > 1) return false;            // colour balance
-
-    if (this._committedWhite && (nb + nw) === 1) {       // turn parity for a single stone
-      const stoneColor = nb === 1 ? STONE.BLACK : STONE.WHITE;
-      const expected   = this._lastColor === STONE.BLACK ? STONE.WHITE : STONE.BLACK;
-      if (stoneColor !== expected) return false;
-    }
-    return true;
-  }
-
-  _commitState(newState, diff) {
-    const prev    = this.boardState;
-    this.boardState = newState;
-
-    const placed  = diff.filter(d => d.from === STONE.EMPTY && d.to !== STONE.EMPTY);
-    const removed = diff.filter(d => d.from !== STONE.EMPTY && d.to === STONE.EMPTY);
-
-    if (placed.length === 0) {
-      if (removed.length) console.info('Stones vanished without a placement:', removed.length);
-      return;
-    }
-
-    // A single sample can reveal several stones played in quick succession. Emit
-    // one move per stone. Real play alternates colors, so we order the batch to
-    // alternate B/W (exact order within a batch is otherwise unknowable). Captures
-    // are attributed to the final move of the batch.
-    const ordered = orderAlternating(placed, this._lastColor);
-    ordered.forEach((p, i) => {
-      const last = i === ordered.length - 1;
-      this.onMove({
-        row: p.row, col: p.col, color: p.to,
-        captures: last ? removed.map(d => ({ row: d.row, col: d.col })) : [],
-        prevBoard: i === 0 ? prev : null,
-      });
-      this._lastColor = p.to;
-      if (p.to === STONE.WHITE) this._committedWhite = true; // activates the alternation rule
-    });
-  }
 
   _freeMats() {
     if (this._src)      { this._src.delete();      this._src      = null; }
@@ -594,28 +646,6 @@ class BoardDetector {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-// Order a batch of newly-placed stones so colors alternate, as real play does.
-// Order within a batch is otherwise unknowable, so we only guarantee alternation.
-// Starting color: the colour with more new stones must have moved first; if the
-// counts are equal it's the opposite of the previous move (Black leads a new game).
-function orderAlternating(placed, lastColor) {
-  const blacks = placed.filter(p => p.to === STONE.BLACK);
-  const whites = placed.filter(p => p.to === STONE.WHITE);
-
-  let cur;
-  if (blacks.length > whites.length)      cur = STONE.BLACK;
-  else if (whites.length > blacks.length) cur = STONE.WHITE;
-  else cur = lastColor === STONE.BLACK ? STONE.WHITE : STONE.BLACK;
-
-  const seq = [];
-  while (blacks.length || whites.length) {
-    if (cur === STONE.BLACK) seq.push(blacks.length ? blacks.shift() : whites.shift());
-    else                     seq.push(whites.length ? whites.shift() : blacks.shift());
-    cur = cur === STONE.BLACK ? STONE.WHITE : STONE.BLACK;
-  }
-  return seq;
-}
 
 function captureFrame(video) {
   const c = document.createElement('canvas');
@@ -785,4 +815,34 @@ function groupHasLiberty(board, r, c) {
     }
   }
   return false;
+}
+
+const other = color => (color === STONE.BLACK ? STONE.WHITE : STONE.BLACK);
+
+// Place a stone on `board`, remove any opponent groups it captures, and return
+// the captured stone coordinates [[r,c]...]. Mutates board.
+function applyMoveCapture(board, color, r, c) {
+  board[r][c] = color;
+  const opp = other(color);
+  const captured = [];
+  const nbrs = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+  for (const [dy, dx] of nbrs) {
+    const ny = r + dy, nx = c + dx;
+    if (ny < 0 || nx < 0 || ny >= BOARD_SIZE || nx >= BOARD_SIZE) continue;
+    if (board[ny][nx] === opp && !groupHasLiberty(board, ny, nx)) {
+      // Flood-fill this dead opponent group and remove it.
+      const stack = [[ny, nx]];
+      while (stack.length) {
+        const [y, x] = stack.pop();
+        if (board[y][x] !== opp) continue;
+        board[y][x] = STONE.EMPTY;
+        captured.push([y, x]);
+        for (const [ddy, ddx] of nbrs) {
+          const ay = y + ddy, ax = x + ddx;
+          if (ay >= 0 && ax >= 0 && ay < BOARD_SIZE && ax < BOARD_SIZE && board[ay][ax] === opp) stack.push([ay, ax]);
+        }
+      }
+    }
+  }
+  return captured;
 }
