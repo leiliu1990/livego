@@ -170,7 +170,7 @@ function startRecording() {
     confirmedCorners,
     confirmedDisplayMeta,
     onMoveDetected,
-    (boardState) => { drawBoardOverlay(boardCanvas, boardState); updateDebugHUD(); },
+    (boardState) => { drawBoardOverlay(boardCanvas, boardState); updateDebugHUD(); publishLiveOnChange(boardState); },
   );
   detector.start();
 
@@ -216,12 +216,35 @@ function viewerLink() {
 }
 
 // Build the compact game JSON the viewer expects: {info, moves:[{c,y,x}]}.
+// Confirmed moves PLUS the current tentative (unconfirmed) stones, so the live
+// viewer matches the recording overlay exactly. (The SGF export uses only
+// confirmed moves + finalize; this provisional list is for live viewing.)
 function buildLiveGame() {
+  const moves = recorder.moves.map(m => ({ c: m.color, y: m.row, x: m.col }));
+  const tent = detector && detector._tentative;
+  if (tent) for (const key in tent) {
+    const [r, c] = key.split(',').map(Number);
+    moves.push({ c: tent[key], y: r, x: c, prov: 1 }); // prov = provisional/tentative
+  }
   return {
     info: { black: recorder.gameInfo.black || 'Black', white: recorder.gameInfo.white || 'White', size: BOARD_SIZE },
-    moves: recorder.moves.map(m => ({ c: m.color, y: m.row, x: m.col })),
+    moves,
     updated: Date.now(),
   };
+}
+
+// Publish when the live display board changes (covers tentative stones appearing,
+// not just confirmed moves) so the viewer mirrors the recording overlay.
+let _lastLiveSig = '';
+function publishLiveOnChange(boardState) {
+  if (!liveGameId) return;
+  let sig = '';
+  for (let r = 0; r < BOARD_SIZE; r++)
+    for (let c = 0; c < BOARD_SIZE; c++)
+      if (boardState[r][c]) sig += r + ',' + c + ':' + boardState[r][c] + ';';
+  if (sig === _lastLiveSig) return;
+  _lastLiveSig = sig;
+  publishLive();
 }
 
 // Debounced publish (coalesce rapid moves into one PUT).
@@ -333,7 +356,7 @@ function recalibrate() {
       confirmedCorners,
       confirmedDisplayMeta,
       onMoveDetected,
-      (boardState) => { drawBoardOverlay(boardCanvas, boardState); updateDebugHUD(); },
+      (boardState) => { drawBoardOverlay(boardCanvas, boardState); updateDebugHUD(); publishLiveOnChange(boardState); },
     );
     detector.start();
     showScreen('screen-record');
