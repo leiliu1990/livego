@@ -507,6 +507,19 @@ function setLive(ok) {
     if (now - lastTap < 300) e.preventDefault();
     lastTap = now;
   }, { passive: false });
+
+  // iPadOS Safari treats the page like desktop and double-tap-zooms buttons even
+  // with user-scalable=no / touch-action:manipulation. Kill it on every button
+  // tap by preventing the default (which also suppresses the emulated click on
+  // Safari), then re-issuing the click ourselves so the button still works and
+  // fast repeated taps still register one action each. Disabled buttons just
+  // get the zoom suppressed.
+  document.addEventListener('touchend', (e) => {
+    const btn = e.target.closest && e.target.closest('button');
+    if (!btn) return;
+    e.preventDefault();
+    if (!btn.disabled) btn.click();
+  }, { passive: false });
 })();
 
 // ── Boot ─────────────────────────────────────────────────────────────────────────
