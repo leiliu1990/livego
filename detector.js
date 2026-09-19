@@ -69,7 +69,9 @@ class BoardDetector {
     this._turn      = STONE.BLACK; // colour we're waiting to confirm next
     this._activated = false;       // has the first white appeared? (before: black handicap/opening)
     this._rejected  = {};          // "r,c" -> colour: losing candidates to ignore while unchanged
-    this._tentative = {};          // "r,c" -> colour: detected-but-unconfirmed, for overlay marking
+    this._tentative = {};          // "r,c" -> colour: the provisional move, for overlay marking
+    this._provisional = null;      // {r,c,color}: best guess for the current unconfirmed move
+    this._display   = Array.from({ length: BOARD_SIZE }, () => new Array(BOARD_SIZE).fill(STONE.EMPTY)); // confirmed + provisional
     this._deltaGrid = null;        // 19×19 post-ambient deltas this frame (for stone-likeness)
 
     this._src    = null;
@@ -117,17 +119,10 @@ class BoardDetector {
     this._freeMats();
   }
 
-  // Confirm the last still-tentative move — call before exporting the SGF at game
-  // end, since a move is normally only confirmed when the opponent replies.
+  // Confirm the last still-provisional move — call before exporting the SGF at
+  // game end, since a move is normally only confirmed when the opponent replies.
   finalizePending() {
-    const pend = [];
-    for (let r = 0; r < BOARD_SIZE; r++)
-      for (let c = 0; c < BOARD_SIZE; c++)
-        if (this.boardState[r][c] !== STONE.EMPTY && this._confirmed[r][c] === STONE.EMPTY &&
-            this._rejected[r + ',' + c] !== this.boardState[r][c])
-          pend.push({ r, c, color: this.boardState[r][c] });
-    const mine = pend.filter(p => p.color === this._turn);
-    if (mine.length >= 1) this._confirmMove(mine.length === 1 ? mine[0] : this._mostStoneLike(mine));
+    if (this._provisional) { this._confirmMove(this._provisional); this._provisional = null; }
   }
 
   undoLastMove(previousState) {
@@ -145,7 +140,9 @@ class BoardDetector {
       const newState = this._detectState();
       if (newState) {
         this._reconcile(newState);
-        this.onFrame?.(this.boardState);
+        // Show the resolved display (confirmed + best provisional), not the raw
+        // detection — so a phantom same-colour stone isn't drawn.
+        this.onFrame?.(this._display);
       }
     } catch (e) {
       console.warn('Detection error:', e);
@@ -479,12 +476,29 @@ class BoardDetector {
       this._turn = other(this._turn);
     }
 
-    // Publish the tentative set (detected but unconfirmed) for the overlay.
-    this._tentative = {};
+    // Determine the single PROVISIONAL move for the current turn: the best alive
+    // candidate of the turn colour (most stone-like among competitors). Losing /
+    // rejected same-colour candidates are NOT shown — this is why the display
+    // hides a phantom same-colour stone instead of drawing two in a row.
+    const cands = [];
     for (let r = 0; r < BOARD_SIZE; r++)
-      for (let c = 0; c < BOARD_SIZE; c++)
-        if (S[r][c] !== STONE.EMPTY && this._confirmed[r][c] === STONE.EMPTY)
-          this._tentative[r + ',' + c] = S[r][c];
+      for (let c = 0; c < BOARD_SIZE; c++) {
+        const v = S[r][c];
+        if (v === this._turn && this._confirmed[r][c] === STONE.EMPTY && this._rejected[r + ',' + c] !== v)
+          cands.push({ r, c, color: v });
+      }
+    this._provisional = cands.length === 0 ? null
+                      : (cands.length === 1 ? cands[0] : this._mostStoneLike(cands));
+
+    // Build the DISPLAY board = confirmed + the provisional move (with its captures).
+    // This is what the overlay and the live viewer both show, so they agree on a
+    // single, legal, alternating game rather than the raw detection.
+    this._display = this._confirmed.map(row => [...row]);
+    this._tentative = {};
+    if (this._provisional) {
+      applyMoveCapture(this._display, this._provisional.color, this._provisional.r, this._provisional.c);
+      this._tentative[this._provisional.r + ',' + this._provisional.c] = this._provisional.color;
+    }
 
     return emitted;
   }
