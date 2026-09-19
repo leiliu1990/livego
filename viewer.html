@@ -373,7 +373,15 @@ function setLive(ok) {
 window.addEventListener('resize', sizeCanvas);
 window.addEventListener('load', sizeCanvas);          // re-size once layout is final
 sizeCanvas();                                         // initial size (viewport-based)
-applyGame(DEMO_GAME);                                 // show demo immediately
+// Only flash the demo when there's no real feed. With ?id=/?game=, show an empty
+// board until the first fetch lands so we jump straight to the live position
+// instead of flashing the demo game first. loadedOnce stays false so the first
+// poll's applyGame is treated as the initial load (jump to latest, no autoplay).
+{
+  const p = new URLSearchParams(location.search);
+  if (p.has('id') || p.has('game')) render();         // empty board, no demo flash
+  else applyGame(DEMO_GAME);                           // no feed → show demo
+}
 requestAnimationFrame(sizeCanvas);                    // and once more after first paint
 poll();
 </script>
