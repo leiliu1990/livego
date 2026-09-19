@@ -6,7 +6,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-fullscreen">
   <title>LiveGo</title>
-  <link rel="stylesheet" href="style.css?v=27">
+  <link rel="stylesheet" href="style.css?v=28">
 </head>
 <body>
 
@@ -20,15 +20,24 @@
       <label>Lens <select id="lens-select"></select></label>
     </div>
 
-    <!-- Two-tap magnifier: tap near a crossing, then tap the exact spot here -->
+    <!-- Magnifier: tap near a crossing, then nudge with arrows to the exact spot -->
     <div id="zoom-overlay">
-      <div id="zoom-hint">Tap the exact crossing</div>
+      <div id="zoom-hint">Nudge to the exact crossing, then Confirm</div>
       <canvas id="zoom-canvas"></canvas>
+      <div id="zoom-pad">
+        <button id="zoom-up" class="zoom-arrow" aria-label="up">▲</button>
+        <div class="zoom-pad-mid">
+          <button id="zoom-left" class="zoom-arrow" aria-label="left">◀</button>
+          <button id="zoom-confirm" class="btn primary">Confirm</button>
+          <button id="zoom-right" class="zoom-arrow" aria-label="right">▶</button>
+        </div>
+        <button id="zoom-down" class="zoom-arrow" aria-label="down">▼</button>
+      </div>
       <button id="zoom-cancel" class="btn ghost">Cancel</button>
     </div>
 
     <div id="setup-ui">
-      <div id="instructions">Tap near each of the 4 outer grid crossings — a magnified view opens so you can tap the exact spot<br><span id="corner-count">0 / 4 corners set</span></div>
+      <div id="instructions">Tap near each of the 4 outer grid crossings — a magnified view opens; nudge with the arrows to the exact spot, then Confirm<br><span id="corner-count">0 / 4 corners set</span></div>
       <div id="setup-buttons">
         <button id="btn-undo-corner" class="btn secondary" disabled>Undo</button>
         <button id="btn-start" class="btn primary" disabled>Start Game</button>
@@ -82,10 +91,10 @@
   </div>
 
   <script src="opencv.js"></script>
-  <script src="live.js?v=27"></script>
-  <script src="corners.js?v=27"></script>
-  <script src="detector.js?v=27"></script>
-  <script src="sgf.js?v=27"></script>
-  <script src="app.js?v=27"></script>
+  <script src="live.js?v=28"></script>
+  <script src="corners.js?v=28"></script>
+  <script src="detector.js?v=28"></script>
+  <script src="sgf.js?v=28"></script>
+  <script src="app.js?v=28"></script>
 </body>
 </html>

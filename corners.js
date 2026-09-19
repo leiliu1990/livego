@@ -2,14 +2,19 @@
 // Corners are stored in tap order: TL, TR, BR, BL (user can tap any order,
 // but we sort them into canonical positions after 4 are chosen).
 //
-// Interaction: two taps per corner. Tap roughly near a grid crossing → a still
-// of the current frame is captured and a large MAGNIFIED crop opens → tap the
-// exact crossing there. Because the zoom draws a frozen still (one drawImage,
-// canvas→canvas), it's reliable on iOS — unlike a live loupe that must redraw
-// the camera feed continuously while a finger drags.
+// Interaction: tap roughly near a grid crossing → a still of the current frame
+// is captured and a large MAGNIFIED crop opens, centred on a crosshair that
+// marks the selected point. The finger no longer has to be precise: use the
+// ↑↓←→ arrow buttons below the view to nudge the crosshair onto the exact
+// crossing (the magnified image re-centres so the crosshair always shows the
+// current point), then Confirm. This avoids the finger covering the spot.
+// The zoom draws a frozen still (one drawImage, canvas→canvas), reliable on iOS.
 
 const MAX_CORNERS = 4;
-const ZOOM_CROP = 140; // display-space px shown across the magnified view
+const ZOOM_CROP = 140;      // display-space px shown across the magnified view
+const NUDGE_STEP = 1;       // display px moved per arrow press
+const NUDGE_DELAY = 300;    // ms before press-and-hold auto-repeat starts
+const NUDGE_REPEAT = 55;    // ms between auto-repeat nudges
 
 class CornerPicker {
   constructor(videoEl, overlayCanvas, onComplete) {
@@ -23,10 +28,13 @@ class CornerPicker {
     this.zoomCanvas  = null;
     this.zoomCtx     = null;
     this.frame       = null;      // offscreen still of the captured frame
-    this.roughPoint  = null;      // {x,y} display coords of the first (rough) tap
+    this.point       = null;      // {x,y} display coords of the selected crossing
+    this._holdTimer  = null;      // press-and-hold timers for arrow auto-repeat
+    this._repeatTimer = null;
 
-    this._onRoughTap  = this._onRoughTap.bind(this);
-    this._onZoomTap   = this._onZoomTap.bind(this);
+    this._onRoughTap   = this._onRoughTap.bind(this);
+    this._onZoomTap    = this._onZoomTap.bind(this);
+    this._onZoomConfirm = this._onZoomConfirm.bind(this);
     this._onZoomCancel = this._onZoomCancel.bind(this);
   }
 
@@ -72,6 +80,43 @@ class CornerPicker {
     this.zoomCanvas.addEventListener('click', this._onZoomTap);
     const cancel = document.getElementById('zoom-cancel');
     if (cancel) cancel.addEventListener('click', this._onZoomCancel);
+    const confirm = document.getElementById('zoom-confirm');
+    if (confirm) confirm.addEventListener('click', this._onZoomConfirm);
+
+    this._bindArrow('zoom-up',    0, -NUDGE_STEP);
+    this._bindArrow('zoom-down',  0,  NUDGE_STEP);
+    this._bindArrow('zoom-left', -NUDGE_STEP, 0);
+    this._bindArrow('zoom-right', NUDGE_STEP, 0);
+  }
+
+  // Press-and-hold arrow: nudge once, then auto-repeat after a short delay.
+  _bindArrow(id, dx, dy) {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    const start = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this._nudge(dx, dy);
+      this._holdTimer = setTimeout(() => {
+        this._repeatTimer = setInterval(() => this._nudge(dx, dy), NUDGE_REPEAT);
+      }, NUDGE_DELAY);
+    };
+    btn.addEventListener('pointerdown', start);
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev =>
+      btn.addEventListener(ev, () => this._stopHold()));
+  }
+
+  _stopHold() {
+    if (this._holdTimer)   { clearTimeout(this._holdTimer);   this._holdTimer = null; }
+    if (this._repeatTimer) { clearInterval(this._repeatTimer); this._repeatTimer = null; }
+  }
+
+  // Move the selected point by (dx,dy) display px, clamp, re-centre the zoom.
+  _nudge(dx, dy) {
+    if (!this.point) return;
+    this.point.x = Math.max(0, Math.min(this.canvas.offsetWidth,  this.point.x + dx));
+    this.point.y = Math.max(0, Math.min(this.canvas.offsetHeight, this.point.y + dy));
+    this._drawZoom();
   }
 
   _openZoom(dx, dy) {
@@ -83,12 +128,13 @@ class CornerPicker {
     this.frame.height = this.video.videoHeight;
     this.frame.getContext('2d').drawImage(this.video, 0, 0);
 
-    this.roughPoint = { x: dx, y: dy };
+    this.point = { x: dx, y: dy };
     this.zoomOverlay.classList.add('show');
-    this._drawZoom(dx, dy);
+    this._drawZoom();
   }
 
-  _drawZoom(dx, dy) {
+  _drawZoom() {
+    const dx = this.point.x, dy = this.point.y;
     const rect = this.zoomCanvas.getBoundingClientRect();
     const css  = rect.width; // square
     const dpr  = window.devicePixelRatio || 1;
@@ -116,18 +162,27 @@ class CornerPicker {
     ctx.stroke();
   }
 
+  // Tapping the zoom view re-centres (coarse move); it does NOT commit — the
+  // finger may cover the spot, so precise placement is done with the arrows.
   _onZoomTap(e) {
     e.stopPropagation();
-    if (!this.roughPoint) return;
+    if (!this.point) return;
     const rect = this.zoomCanvas.getBoundingClientRect();
     const css  = rect.width;
     const zx = e.clientX - rect.left;
     const zy = e.clientY - rect.top;
-    // Map the tap in the zoom view back to display coords.
-    const cx = this.roughPoint.x + (zx / css - 0.5) * ZOOM_CROP;
-    const cy = this.roughPoint.y + (zy / css - 0.5) * ZOOM_CROP;
+    // Map the tap in the zoom view back to display coords, then re-centre.
+    this.point.x = this.point.x + (zx / css - 0.5) * ZOOM_CROP;
+    this.point.y = this.point.y + (zy / css - 0.5) * ZOOM_CROP;
+    this._drawZoom();
+  }
+
+  _onZoomConfirm(e) {
+    if (e) e.stopPropagation();
+    if (!this.point) return;
+    const { x, y } = this.point;
     this._hideZoom();
-    this._commitPoint(cx, cy);
+    this._commitPoint(x, y);
   }
 
   _onZoomCancel(e) {
@@ -136,7 +191,8 @@ class CornerPicker {
   }
 
   _hideZoom() {
-    this.roughPoint = null;
+    this._stopHold();
+    this.point = null;
     if (this.zoomOverlay) this.zoomOverlay.classList.remove('show');
   }
 

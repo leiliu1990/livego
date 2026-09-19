@@ -109,6 +109,32 @@ video, #overlay, #board-canvas {
 #zoom-hint { color: #fff; font-size: 16px; font-weight: 600; }
 #zoom-cancel { max-width: 200px; }
 
+/* Arrow pad for fine-tuning the selected crossing */
+#zoom-pad {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.zoom-pad-mid {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.zoom-arrow {
+  width: 60px; height: 60px;
+  font-size: 22px;
+  border: none;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.16);
+  color: #fff;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.zoom-arrow:active { background: rgba(52,199,89,0.55); }
+#zoom-confirm { width: 120px; }
+
 /* ── Setup UI ── */
 #setup-ui {
   position: absolute;
