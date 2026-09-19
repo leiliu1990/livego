@@ -54,6 +54,15 @@
       display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
       padding: 4px 16px 20px;
     }
+    #controls.hidden, #try-bar.hidden, #try-controls.hidden { display: none; }
+    #try-bar { width: 100%; max-width: 640px; padding: 0 16px 12px; }
+    #try-bar button { width: 100%; font-size: 16px; padding: 13px 0; }
+    #try-controls {
+      width: 100%; max-width: 640px;
+      display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+      padding: 4px 16px 20px;
+    }
+    #try-controls button { font-size: 16px; }
     button {
       appearance: none; border: none; cursor: pointer;
       background: var(--panel); color: var(--fg);
@@ -88,6 +97,13 @@
     <button id="btn-next"  title="Next">▶</button>
     <button id="btn-end" class="play" title="Latest / Live">⏭</button>
   </div>
+  <div id="try-bar">
+    <button id="btn-try">试下 · Try variation</button>
+  </div>
+  <div id="try-controls" class="hidden">
+    <button id="btn-try-undo" title="Undo">悔一手</button>
+    <button id="btn-try-end" class="play" title="End variation">结束试下</button>
+  </div>
   <div class="hint">Arrow keys ← → to step · Space for latest. Auto-plays new moves when you're at the latest.</div>
 
 <script src="live.js?v=28"></script>
@@ -114,6 +130,14 @@ let game = { info: {}, moves: [] };
 let index = 0;            // number of moves shown (0 = empty board)
 let autoplayTimer = null;
 let lastFetchOk = 0;
+
+// Try-variation ("试下") state: a scratch board branched off the current position.
+let tryMode = false;
+let tryBoard = null;      // scratch board we mutate while trying moves
+let tryMoves = [];        // [{y,x,c}] in play order; the label is the index+1
+let tryStartColor = 1;    // whose turn it is at the branch point
+let tryCapB = 0, tryCapW = 0; // stones captured during the variation
+let tryWasAtEnd = false;  // were we following the live end when we branched?
 
 // ── Go engine: replay moves with capture rules ──────────────────────────────────
 function emptyBoard() {
@@ -196,7 +220,13 @@ function render() {
   const margin = S * 0.045;
   const grid = S - 2 * margin;
   const step = grid / (BOARD_SIZE - 1);
-  const { board, capB, capW, last } = stateAt(index);
+  let board, capB, capW, last;
+  if (tryMode) {
+    board = tryBoard; capB = tryCapB; capW = tryCapW;
+    last = tryMoves.length ? tryMoves[tryMoves.length - 1] : null;
+  } else {
+    ({ board, capB, capW, last } = stateAt(index));
+  }
 
   // Wood
   ctx.fillStyle = '#e3b96b';
@@ -234,16 +264,26 @@ function render() {
     ctx.strokeStyle = v === 1 ? '#000' : '#aaa'; ctx.lineWidth = 0.5; ctx.stroke();
   }
 
-  // Last-move marker
-  if (last) {
+  // Try-variation stones get sequence numbers (1,2,3…) instead of a ring marker.
+  if (tryMode) {
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = `bold ${Math.round(step * 0.52)}px -apple-system, system-ui, sans-serif`;
+    tryMoves.forEach((m, i) => {
+      if (board[m.y][m.x] !== m.c) return;     // this try stone was captured
+      const px = margin + m.x * step, py = margin + m.y * step;
+      ctx.fillStyle = m.c === 1 ? '#fff' : '#111';
+      ctx.fillText(String(i + 1), px, py);
+    });
+  } else if (last) {
+    // Last-move marker (normal replay)
     const px = margin + last.x * step, py = margin + last.y * step;
     ctx.beginPath(); ctx.arc(px, py, sr * 0.35, 0, 7);
     ctx.strokeStyle = last.c === 1 ? '#fff' : '#d00'; ctx.lineWidth = Math.max(1.5, step*0.05); ctx.stroke();
   }
 
   // Labels
-  document.getElementById('move-label').textContent = 'Move ' + index;
-  document.getElementById('move-total').textContent = game.moves.length;
+  document.getElementById('move-label').textContent = tryMode ? '试下' : 'Move ' + index;
+  document.getElementById('move-total').textContent = tryMode ? tryMoves.length : game.moves.length;
   document.getElementById('last-coord').textContent = last ? '· ' + coordLabel(last) : '';
   document.getElementById('cap-black').textContent = capB ? `+${capB}` : '';
   document.getElementById('cap-white').textContent = capW ? `+${capW}` : '';
@@ -271,17 +311,112 @@ function updateButtons() {
   document.getElementById('btn-prev').disabled  = index === 0;
   document.getElementById('btn-next').disabled  = isAtEnd();
   document.getElementById('btn-end').disabled   = isAtEnd() && !autoplayTimer;
+  document.getElementById('btn-try-undo').disabled = tryMoves.length === 0;
 }
 document.getElementById('btn-begin').onclick = () => goto(0);
 document.getElementById('btn-prev').onclick  = () => goto(index - 1);
 document.getElementById('btn-next').onclick  = () => goto(index + 1);
 document.getElementById('btn-end').onclick   = () => goto(game.moves.length);
 window.addEventListener('keydown', e => {
+  if (tryMode) {                              // in a variation, nav keys are disabled
+    if (e.key === 'Backspace') { e.preventDefault(); tryUndo(); }
+    else if (e.key === 'Escape') exitTry();
+    return;
+  }
   if (e.key === 'ArrowLeft') goto(index - 1);
   else if (e.key === 'ArrowRight') goto(index + 1);
   else if (e.key === 'Home') goto(0);
   else if (e.key === 'End' || e.key === ' ') goto(game.moves.length);
 });
+
+// ── Try variation ("试下") ────────────────────────────────────────────────────────
+// Branch a scratch board off the current position; place alternating stones with
+// full capture + suicide rules; each stone is labelled by its play order. Ending
+// the variation discards it and returns to the live game (jumped to the latest).
+function enterTry() {
+  stopAutoplay();
+  tryWasAtEnd = isAtEnd();
+  const { board, last } = stateAt(index);
+  tryBoard = board.map(r => r.slice());
+  tryStartColor = last ? (last.c === 1 ? 2 : 1) : 1; // opposite of last real move
+  tryMoves = [];
+  tryCapB = tryCapW = 0;
+  tryMode = true;
+  document.getElementById('controls').classList.add('hidden');
+  document.getElementById('try-bar').classList.add('hidden');
+  document.getElementById('try-controls').classList.remove('hidden');
+  render();
+}
+function exitTry() {
+  tryMode = false;
+  tryBoard = null; tryMoves = [];
+  document.getElementById('controls').classList.remove('hidden');
+  document.getElementById('try-bar').classList.remove('hidden');
+  document.getElementById('try-controls').classList.add('hidden');
+  // If we were following the live end, jump to the latest (new moves may have
+  // arrived while trying); otherwise stay on the position we branched from.
+  if (tryWasAtEnd) index = game.moves.length;
+  render();
+}
+function tryNextColor() {
+  return (tryMoves.length % 2 === 0) ? tryStartColor : (tryStartColor === 1 ? 2 : 1);
+}
+// Place a stone with Go rules on tryBoard. Returns true if legal (and applied).
+function tryPlace(y, x) {
+  if (tryBoard[y][x] !== 0) return false;    // occupied
+  const color = tryNextColor();
+  const opp = color === 1 ? 2 : 1;
+  tryBoard[y][x] = color;
+  const captured = [];
+  for (const [ny, nx] of neighbors(y, x)) {
+    if (tryBoard[ny][nx] === opp) {
+      const g = groupInfo(tryBoard, ny, nx);
+      if (g.libs === 0) for (const [gy, gx] of g.stones) { tryBoard[gy][gx] = 0; captured.push([gy, gx]); }
+    }
+  }
+  // Suicide: no captures and the placed group has no liberties → illegal, revert.
+  if (captured.length === 0 && groupInfo(tryBoard, y, x).libs === 0) {
+    tryBoard[y][x] = 0;
+    return false;
+  }
+  if (captured.length) { if (color === 1) tryCapB += captured.length; else tryCapW += captured.length; }
+  tryMoves.push({ y, x, c: color });
+  render();
+  return true;
+}
+function tryUndo() {
+  if (!tryMoves.length) return;
+  const { board } = stateAt(index);          // rebuild from the branch point
+  tryBoard = board.map(r => r.slice());
+  tryCapB = tryCapW = 0;
+  tryMoves.pop();
+  for (const m of tryMoves) {
+    const cap = applyMove(tryBoard, m.c, m.y, m.x);
+    if (cap.length) { if (m.c === 1) tryCapB += cap.length; else tryCapW += cap.length; }
+  }
+  render();
+}
+
+// Map a tap/click on the board canvas to the nearest intersection.
+function eventToPoint(e) {
+  const rect = canvas.getBoundingClientRect();
+  const cx = (e.clientX ?? (e.changedTouches && e.changedTouches[0].clientX)) - rect.left;
+  const cy = (e.clientY ?? (e.changedTouches && e.changedTouches[0].clientY)) - rect.top;
+  const S = rect.width;                       // css px; board is square
+  const margin = S * 0.045, grid = S - 2 * margin, step = grid / (BOARD_SIZE - 1);
+  const x = Math.round((cx - margin) / step);
+  const y = Math.round((cy - margin) / step);
+  if (x < 0 || x >= BOARD_SIZE || y < 0 || y >= BOARD_SIZE) return null;
+  return { x, y };
+}
+canvas.addEventListener('click', (e) => {
+  if (!tryMode) return;
+  const p = eventToPoint(e);
+  if (p) tryPlace(p.y, p.x);
+});
+document.getElementById('btn-try').onclick      = enterTry;
+document.getElementById('btn-try-end').onclick  = exitTry;
+document.getElementById('btn-try-undo').onclick = tryUndo;
 
 // ── Autoplay of newly-arrived moves ─────────────────────────────────────────────
 function stopAutoplay() { if (autoplayTimer) { clearTimeout(autoplayTimer); autoplayTimer = null; } }
@@ -321,6 +456,10 @@ function applyGame(next) {
   game = next || { info: {}, moves: [] };
   document.getElementById('p-black').textContent = game.info?.black || 'Black';
   document.getElementById('p-white').textContent = game.info?.white || 'White';
+
+  // Don't disturb an in-progress variation; the new moves are stored in `game`
+  // and take effect (jump to latest) when the user ends the try-out.
+  if (tryMode) return;
 
   if (!loadedOnce) {                          // first load → jump straight to the latest position
     loadedOnce = true;
@@ -363,6 +502,7 @@ function setLive(ok) {
   if (!boardEl) return;
   let lastTap = 0;
   boardEl.addEventListener('touchend', (e) => {
+    if (tryMode) return;                      // in a variation every tap places a stone
     const now = Date.now();
     if (now - lastTap < 300) e.preventDefault();
     lastTap = now;
