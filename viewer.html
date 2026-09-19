@@ -2,13 +2,14 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <title>LiveGo — Viewer</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
     :root { --bg:#1c1c1e; --panel:#2c2c2e; --line:#3a3a3c; --fg:#e5e5ea; --dim:#8e8e93; --accent:#30d158; }
     html, body { height: 100%; }
+    * { touch-action: manipulation; }  /* kill double-tap-to-zoom */
     body {
       background: var(--bg); color: var(--fg);
       font: 15px/1.4 -apple-system, system-ui, sans-serif;
@@ -89,7 +90,7 @@
   </div>
   <div class="hint">Arrow keys ← → to step · Space for latest. Auto-plays new moves when you're at the latest.</div>
 
-<script src="live.js?v=25"></script>
+<script src="live.js?v=28"></script>
 <script>
 // ── Config ──────────────────────────────────────────────────────────────────────
 const BOARD_SIZE = 19;
@@ -353,6 +354,20 @@ function setLive(ok) {
   b.classList.toggle('live', ok);
   t.textContent = ok ? 'LIVE' : 'reconnecting…';
 }
+
+// Fallback for iOS Safari, which can ignore user-scalable=no: on the board only,
+// swallow a second tap within 300 ms so a quick double-tap doesn't zoom. Scoped
+// to the board (which has no tap action) so the nav buttons still take fast taps.
+(() => {
+  const boardEl = document.getElementById('board');
+  if (!boardEl) return;
+  let lastTap = 0;
+  boardEl.addEventListener('touchend', (e) => {
+    const now = Date.now();
+    if (now - lastTap < 300) e.preventDefault();
+    lastTap = now;
+  }, { passive: false });
+})();
 
 // ── Boot ─────────────────────────────────────────────────────────────────────────
 window.addEventListener('resize', sizeCanvas);
