@@ -6,7 +6,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-fullscreen">
   <title>LiveGo</title>
-  <link rel="stylesheet" href="style.css?v=28">
+  <link rel="stylesheet" href="style.css?v=29">
 </head>
 <body>
 
@@ -74,6 +74,7 @@
       </div>
       <div id="record-buttons">
         <button id="btn-undo-move" class="btn secondary">Undo Move</button>
+        <button id="btn-fix" class="btn secondary">修正 Fix</button>
         <button id="btn-recalibrate" class="btn secondary">Recalibrate</button>
         <button id="btn-export" class="btn primary">Export SGF</button>
       </div>
@@ -88,13 +89,24 @@
         <button id="btn-live-copy" class="btn ghost">Copy viewer link</button>
       </div>
     </div>
+
+    <!-- Manual fix: edit the position to match the physical board, then resume -->
+    <div id="fix-overlay" class="hidden">
+      <div id="fix-hint">点交叉点循环 空→黑→白→空，改到和实体棋盘一致</div>
+      <canvas id="fix-canvas"></canvas>
+      <div id="fix-controls">
+        <button id="btn-fix-turn" class="btn secondary">下一手：黑</button>
+        <button id="btn-fix-cancel" class="btn ghost">取消</button>
+        <button id="btn-fix-apply" class="btn primary">应用并继续</button>
+      </div>
+    </div>
   </div>
 
   <script src="opencv.js"></script>
-  <script src="live.js?v=28"></script>
-  <script src="corners.js?v=28"></script>
-  <script src="detector.js?v=28"></script>
-  <script src="sgf.js?v=28"></script>
-  <script src="app.js?v=28"></script>
+  <script src="live.js?v=29"></script>
+  <script src="corners.js?v=29"></script>
+  <script src="detector.js?v=29"></script>
+  <script src="sgf.js?v=29"></script>
+  <script src="app.js?v=29"></script>
 </body>
 </html>

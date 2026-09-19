@@ -9,6 +9,19 @@ class SGFRecorder {
     this.gameInfo = gameInfo;
     this.moves = []; // [{color, row, col, captures}]
     this.undoStack = []; // for undo support
+    this.setup = null; // after a manual fix: [{c,y,x}] added stones (SGF AB/AW)
+  }
+
+  // Manual-fix (approach A): make `board` the new starting position. Prior moves
+  // are dropped; subsequent detected moves append after this setup position.
+  setSetupPosition(board) {
+    this.moves = [];
+    this.undoStack = [];
+    this.setup = [];
+    for (let r = 0; r < BOARD_SIZE; r++) for (let c = 0; c < BOARD_SIZE; c++) {
+      const v = board[r][c];
+      if (v) this.setup.push({ c: v, y: r, x: c });
+    }
   }
 
   addMove({ color, row, col, captures }) {
@@ -56,6 +69,14 @@ class SGFRecorder {
     sgf += `KM[${komi}]\n`;
     sgf += `DT[${date}]\n`;
     sgf += `AP[LiveGo:1.0]\n`;
+
+    // Manual-fix setup stones become AB/AW on the root node.
+    if (this.setup && this.setup.length) {
+      const ab = this.setup.filter(s => s.c === STONE.BLACK).map(s => `[${colRow(s.x, s.y)}]`).join('');
+      const aw = this.setup.filter(s => s.c === STONE.WHITE).map(s => `[${colRow(s.x, s.y)}]`).join('');
+      if (ab) sgf += `AB${ab}\n`;
+      if (aw) sgf += `AW${aw}\n`;
+    }
 
     for (const m of this.moves) {
       const colorTag = m.color === STONE.BLACK ? 'B' : 'W';

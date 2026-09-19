@@ -119,6 +119,43 @@ class BoardDetector {
     this._freeMats();
   }
 
+  // Pause/resume the detection loop without freeing the OpenCV mats or the
+  // baseline — used while the user manually edits the position.
+  pause()  { this.running = false; }
+  resume() { if (!this.running) { this.running = true; this._tick(); } }
+
+  // The board currently shown on the overlay (confirmed + best provisional).
+  getBoard() {
+    return (this._display || this._confirmed).map(row => [...row]);
+  }
+
+  // Replace the confirmed position wholesale after a manual fix. `board` is a
+  // 19×19 array of STONE values matching the physical board; `nextTurn` is who
+  // plays next. Resets the tentative machine and marks every present stone as
+  // mature so detection resumes cleanly from here. Baseline (lighting) is kept.
+  setBoardState(board, nextTurn) {
+    this._confirmed = board.map(row => row.map(v => v || STONE.EMPTY));
+    this._turn = nextTurn || STONE.BLACK;
+    let hasWhite = false, hasAny = false;
+    for (let r = 0; r < BOARD_SIZE; r++) for (let c = 0; c < BOARD_SIZE; c++) {
+      const v = this._confirmed[r][c];
+      this._age[r][c] = v !== STONE.EMPTY ? AGE_PROTECT : 0; // mature → protected
+      if (v === STONE.WHITE) hasWhite = true;
+      if (v !== STONE.EMPTY) hasAny = true;
+    }
+    this._activated      = hasAny;              // past the opening/handicap
+    this._committedWhite = hasWhite;
+    this._lastColor      = other(this._turn);
+    this._rejected   = {};
+    this._tentative  = {};
+    this._provisional = null;
+    this._display    = this._confirmed.map(row => [...row]);
+    this.boardState  = this._confirmed.map(row => [...row]);
+    this.pendingState = null;
+    this.pendingCount = 0;
+    this.onFrame?.(this._display);              // redraw + republish via the normal path
+  }
+
   // Confirm the last still-provisional move — call before exporting the SGF at
   // game end, since a move is normally only confirmed when the opponent replies.
   finalizePending() {

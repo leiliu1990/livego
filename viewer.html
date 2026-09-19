@@ -183,8 +183,10 @@ function applyMove(board, color, y, x) {
   return captured;
 }
 // Board state after `n` moves, plus capture tally and the last move's coords.
+// If the game has a `setup` position (from a manual fix), the board starts there.
 function stateAt(n) {
   const board = emptyBoard();
+  if (game.setup) for (const s of game.setup) board[s.y][s.x] = s.c;
   let capB = 0, capW = 0, last = null;
   for (let i = 0; i < n && i < game.moves.length; i++) {
     const m = game.moves[i];

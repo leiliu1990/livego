@@ -8,6 +8,11 @@ let lastMove             = null; // {row, col, color} — highlighted on the ove
 let liveGameId           = null; // set when broadcasting; null = offline
 let livePublishTimer     = null;
 
+// Manual-fix mode: edit a scratch board to match the physical board, then resume.
+let fixMode  = false;
+let fixBoard = null;             // 19×19 STONE values being edited
+let fixTurn  = STONE.BLACK;      // who plays next after the fix
+
 function onOpenCvReady() {
   if (cvReady) return;
   cvReady = true;
@@ -177,6 +182,12 @@ function startRecording() {
   setStatus('green');
 
   document.getElementById('btn-undo-move').addEventListener('click', undoMove);
+  document.getElementById('btn-fix').addEventListener('click', enterFix);
+  document.getElementById('btn-fix-turn').addEventListener('click', toggleFixTurn);
+  document.getElementById('btn-fix-cancel').addEventListener('click', cancelFix);
+  document.getElementById('btn-fix-apply').addEventListener('click', applyFix);
+  document.getElementById('fix-canvas').addEventListener('click', onFixTap);
+  window.addEventListener('resize', () => { if (fixMode) drawFixBoard(); });
   document.getElementById('btn-recalibrate').addEventListener('click', recalibrate);
   document.getElementById('btn-export').addEventListener('click', () => { detector?.finalizePending(); recorder.download(); });
   document.getElementById('btn-debug-toggle').addEventListener('click', toggleDebugHUD);
@@ -226,11 +237,14 @@ function buildLiveGame() {
     const [r, c] = key.split(',').map(Number);
     moves.push({ c: tent[key], y: r, x: c, prov: 1 }); // prov = provisional/tentative
   }
-  return {
+  const game = {
     info: { black: recorder.gameInfo.black || 'Black', white: recorder.gameInfo.white || 'White', size: BOARD_SIZE },
     moves,
     updated: Date.now(),
   };
+  // After a manual fix, the corrected board is the starting position (approach A).
+  if (recorder.setup && recorder.setup.length) game.setup = recorder.setup;
+  return game;
 }
 
 // Publish when the live display board changes (covers tentative stones appearing,
@@ -330,11 +344,59 @@ function onMoveDetected(moveObj) {
 
 function undoMove() {
   if (!recorder || recorder.moveCount === 0) return;
-  const m = recorder.undoLast();
-  if (m && detector) detector.undoLastMove(deepCloneBoard(detector.boardState));
+  const removed = recorder.undoLast();
   const prev = recorder.moves[recorder.moves.length - 1];
   lastMove = prev ? { row: prev.row, col: prev.col, color: prev.color } : null;
+  // Re-sync the detector to the replayed position so it diffs against the
+  // corrected board and re-detects from here. The undone move's colour is now
+  // the side to play again.
+  if (detector) {
+    const board = boardFromMoves(recorder.moves, recorder.setup);
+    detector.setBoardState(board, removed ? removed.color : STONE.BLACK);
+  }
   updateRecordUI();
+  publishLive();
+}
+
+// Replay a move list (optionally from a setup position) into a board, applying
+// Go capture rules. Used by undo and to seed edits.
+function boardFromMoves(moves, setup) {
+  const b = Array.from({ length: BOARD_SIZE }, () => new Array(BOARD_SIZE).fill(STONE.EMPTY));
+  if (setup) for (const s of setup) b[s.y][s.x] = s.c;
+  for (const m of moves) applyCapture(b, m.color, m.row, m.col);
+  return b;
+}
+function neighbors4(r, c) {
+  const o = [];
+  if (r > 0) o.push([r - 1, c]);
+  if (r < BOARD_SIZE - 1) o.push([r + 1, c]);
+  if (c > 0) o.push([r, c - 1]);
+  if (c < BOARD_SIZE - 1) o.push([r, c + 1]);
+  return o;
+}
+function groupLibs(board, r, c) {
+  const color = board[r][c];
+  const seen = new Set([r * BOARD_SIZE + c]), stack = [[r, c]];
+  let libs = 0;
+  while (stack.length) {
+    const [y, x] = stack.pop();
+    for (const [ny, nx] of neighbors4(y, x)) {
+      const v = board[ny][nx];
+      if (v === STONE.EMPTY) libs++;
+      else if (v === color && !seen.has(ny * BOARD_SIZE + nx)) { seen.add(ny * BOARD_SIZE + nx); stack.push([ny, nx]); }
+    }
+  }
+  return { stones: seen, libs };
+}
+function applyCapture(board, color, r, c) {
+  board[r][c] = color;
+  const opp = color === STONE.BLACK ? STONE.WHITE : STONE.BLACK;
+  for (const [ny, nx] of neighbors4(r, c)) {
+    if (board[ny][nx] === opp) {
+      const g = groupLibs(board, ny, nx);
+      if (g.libs === 0) for (const key of g.stones) board[Math.floor(key / BOARD_SIZE)][key % BOARD_SIZE] = STONE.EMPTY;
+    }
+  }
 }
 
 function recalibrate() {
@@ -361,6 +423,108 @@ function recalibrate() {
     detector.start();
     showScreen('screen-record');
   }, { once: true });
+}
+
+// ── Manual fix ──────────────────────────────────────────────────────────────
+// Edit the position to match the physical board, then resume detection from it.
+// The corrected board becomes the SGF/broadcast starting position (approach A).
+
+function enterFix() {
+  if (!detector) return;
+  detector.pause();
+  fixBoard = detector.getBoard();
+  fixTurn  = detector._turn || STONE.BLACK;
+  fixMode  = true;
+  updateFixTurnLabel();
+  document.getElementById('fix-overlay').classList.remove('hidden');
+  drawFixBoard();
+}
+
+function cancelFix() {
+  fixMode = false;
+  document.getElementById('fix-overlay').classList.add('hidden');
+  detector?.resume();
+}
+
+function applyFix() {
+  if (!detector) return;
+  detector.setBoardState(fixBoard, fixTurn);   // resume from the corrected board
+  recorder.setSetupPosition(fixBoard);         // corrected board = new SGF/broadcast start
+  lastMove = null;
+  fixMode = false;
+  document.getElementById('fix-overlay').classList.add('hidden');
+  detector.resume();
+  drawBoardOverlay(document.getElementById('board-canvas'), detector.getBoard());
+  updateRecordUI();
+  _lastLiveSig = '';                            // force a fresh publish of the new position
+  publishLiveNow();
+}
+
+function toggleFixTurn() {
+  fixTurn = fixTurn === STONE.BLACK ? STONE.WHITE : STONE.BLACK;
+  updateFixTurnLabel();
+}
+function updateFixTurnLabel() {
+  document.getElementById('btn-fix-turn').textContent =
+    '下一手：' + (fixTurn === STONE.BLACK ? '黑' : '白');
+}
+
+// Tap an intersection → cycle empty → black → white → empty.
+function onFixTap(e) {
+  if (!fixMode) return;
+  const canvas = document.getElementById('fix-canvas');
+  const rect = canvas.getBoundingClientRect();
+  const S = rect.width; // square, CSS px
+  const margin = S / (BOARD_SIZE + 1);
+  const step = (S - 2 * margin) / (BOARD_SIZE - 1);
+  const c = Math.round(((e.clientX - rect.left) - margin) / step);
+  const r = Math.round(((e.clientY - rect.top)  - margin) / step);
+  if (r < 0 || r >= BOARD_SIZE || c < 0 || c >= BOARD_SIZE) return;
+  const cur = fixBoard[r][c];
+  fixBoard[r][c] = cur === STONE.EMPTY ? STONE.BLACK : cur === STONE.BLACK ? STONE.WHITE : STONE.EMPTY;
+  drawFixBoard();
+}
+
+function drawFixBoard() {
+  const canvas = document.getElementById('fix-canvas');
+  const cssW = canvas.getBoundingClientRect().width;
+  if (!cssW) return;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width  = Math.round(cssW * dpr);
+  canvas.height = Math.round(cssW * dpr);
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const S = cssW;
+  const margin = S / (BOARD_SIZE + 1);
+  const step = (S - 2 * margin) / (BOARD_SIZE - 1);
+
+  ctx.clearRect(0, 0, S, S);
+  ctx.fillStyle = '#cdaa64';
+  ctx.fillRect(0, 0, S, S);
+
+  ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+  ctx.lineWidth = Math.max(0.6, step * 0.03);
+  for (let i = 0; i < BOARD_SIZE; i++) {
+    const p = margin + i * step;
+    ctx.beginPath(); ctx.moveTo(margin, p); ctx.lineTo(S - margin, p); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(p, margin); ctx.lineTo(p, S - margin); ctx.stroke();
+  }
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  for (const r of HOSHI) for (const c of HOSHI) {
+    ctx.beginPath(); ctx.arc(margin + c * step, margin + r * step, Math.max(2, step * 0.1), 0, 7); ctx.fill();
+  }
+
+  const sr = step * 0.46;
+  for (let r = 0; r < BOARD_SIZE; r++) for (let c = 0; c < BOARD_SIZE; c++) {
+    const v = fixBoard[r][c];
+    if (!v) continue;
+    const px = margin + c * step, py = margin + r * step;
+    const g = ctx.createRadialGradient(px - sr*0.3, py - sr*0.3, sr*0.1, px, py, sr);
+    if (v === STONE.BLACK) { g.addColorStop(0,'#555'); g.addColorStop(1,'#111'); }
+    else                   { g.addColorStop(0,'#fff'); g.addColorStop(1,'#ccc'); }
+    ctx.beginPath(); ctx.arc(px, py, sr, 0, 7); ctx.fillStyle = g; ctx.fill();
+    ctx.strokeStyle = v === STONE.BLACK ? '#000' : '#999'; ctx.lineWidth = 0.6; ctx.stroke();
+  }
 }
 
 // ── Board overlay ─────────────────────────────────────────────────────────────
