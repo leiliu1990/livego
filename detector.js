@@ -142,7 +142,7 @@ class BoardDetector {
   // When `calibrate` is set (a manual fix, where the stones are ground truth),
   // adapt the black/white delta thresholds to this board using those stones.
   setBoardState(board, nextTurn, calibrate) {
-    if (calibrate) this._recalibrate(board);
+    if (calibrate) { this._recalibrate(board); this._fixupBaseline(board); }
     this._confirmed = board.map(row => row.map(v => v || STONE.EMPTY));
     this._turn = nextTurn || STONE.BLACK;
     let hasWhite = false, hasAny = false;
@@ -211,6 +211,34 @@ class BoardDetector {
       if (eLo - bHi >= MIN_GAP) this._blackDelta = clamp((eLo + bHi) / 2, -110, -35);
     }
     console.log(`[recalibrate] white≥${this._whiteDelta.toFixed(0)} black≤${this._blackDelta.toFixed(0)} (from ${black.length}B/${white.length}W samples)`);
+  }
+
+  // Start-mid-game support. The empty baseline is captured on the first frame,
+  // which assumes an empty board. If stones are already present then, those
+  // cells' baselines hold STONE brightness, not wood — so a later removal reads
+  // a huge delta and misclassifies (a lifted black → bright wood → phantom white).
+  // After a fix, reset any occupied cell whose baseline is far from the wood level
+  // (median of the now-empty cells) back to that wood level. Cells whose baseline
+  // already matches wood (a normal mid-game fix, baseline captured empty) are left
+  // untouched — their true reading is better than an estimate. Black contamination
+  // (~150 below wood) is always caught; that's the only case that misclassifies.
+  _fixupBaseline(board) {
+    if (!this._baseline) return;
+    const woodVals = [];
+    for (let r = 0; r < BOARD_SIZE; r++)
+      for (let c = 0; c < BOARD_SIZE; c++)
+        if (!board[r][c]) woodVals.push(this._baseline[r][c]);
+    if (woodVals.length < 30) return;        // too few empty cells to estimate wood
+    const wood = medianOf(woodVals);
+    const K = 45;                            // deviation beyond which a baseline is "a stone, not wood"
+    let fixed = 0;
+    for (let r = 0; r < BOARD_SIZE; r++)
+      for (let c = 0; c < BOARD_SIZE; c++)
+        if (board[r][c] && Math.abs(this._baseline[r][c] - wood) > K) {
+          this._baseline[r][c] = wood;
+          fixed++;
+        }
+    if (fixed) console.log(`[baseline fixup] reset ${fixed} contaminated cell(s) to wood≈${wood.toFixed(0)}`);
   }
 
   // Confirm the last still-provisional move — call before exporting the SGF at

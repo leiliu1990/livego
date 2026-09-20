@@ -6,7 +6,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-fullscreen">
   <title>LiveGo</title>
-  <link rel="stylesheet" href="style.css?v=30">
+  <link rel="stylesheet" href="style.css?v=31">
 </head>
 <body>
 
@@ -92,7 +92,7 @@
 
     <!-- Manual fix: edit the position to match the physical board, then resume -->
     <div id="fix-overlay" class="hidden">
-      <div id="fix-hint">点交叉点循环 空→黑→白→空，改到和实体棋盘一致</div>
+      <div id="fix-hint">点交叉点循环 空→黑→白→空，改到和实体棋盘一致<br><span style="opacity:.7;font-weight:400">中盘开局也用这个：把盘上已有的子摆进去，选好下一手，应用即可</span></div>
       <canvas id="fix-canvas"></canvas>
       <div id="fix-controls">
         <button id="btn-fix-turn" class="btn secondary">下一手：黑</button>
@@ -103,10 +103,10 @@
   </div>
 
   <script src="opencv.js"></script>
-  <script src="live.js?v=30"></script>
-  <script src="corners.js?v=30"></script>
-  <script src="detector.js?v=30"></script>
-  <script src="sgf.js?v=30"></script>
-  <script src="app.js?v=30"></script>
+  <script src="live.js?v=31"></script>
+  <script src="corners.js?v=31"></script>
+  <script src="detector.js?v=31"></script>
+  <script src="sgf.js?v=31"></script>
+  <script src="app.js?v=31"></script>
 </body>
 </html>
