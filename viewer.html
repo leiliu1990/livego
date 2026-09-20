@@ -63,6 +63,9 @@
       padding: 4px 16px 20px;
     }
     #try-controls button { font-size: 16px; }
+    #export-bar { width: 100%; max-width: 640px; padding: 0 16px 8px; }
+    #export-bar.hidden { display: none; }
+    #export-bar button { width: 100%; font-size: 15px; padding: 12px 0; }
     button {
       appearance: none; border: none; cursor: pointer;
       background: var(--panel); color: var(--fg);
@@ -103,6 +106,9 @@
   <div id="try-controls" class="hidden">
     <button id="btn-try-undo" title="Undo">悔一手</button>
     <button id="btn-try-end" class="play" title="End variation">结束试下</button>
+  </div>
+  <div id="export-bar">
+    <button id="btn-export" title="Export SGF">⬇ 导出 SGF · Export</button>
   </div>
   <div class="hint">Arrow keys ← → to step · Space for latest. Auto-plays new moves when you're at the latest.</div>
 
@@ -346,6 +352,7 @@ function enterTry() {
   tryMode = true;
   document.getElementById('controls').classList.add('hidden');
   document.getElementById('try-bar').classList.add('hidden');
+  document.getElementById('export-bar').classList.add('hidden');
   document.getElementById('try-controls').classList.remove('hidden');
   render();
 }
@@ -354,6 +361,7 @@ function exitTry() {
   tryBoard = null; tryMoves = [];
   document.getElementById('controls').classList.remove('hidden');
   document.getElementById('try-bar').classList.remove('hidden');
+  document.getElementById('export-bar').classList.remove('hidden');
   document.getElementById('try-controls').classList.add('hidden');
   // If we were following the live end, jump to the latest (new moves may have
   // arrived while trying); otherwise stay on the position we branched from.
@@ -419,6 +427,55 @@ canvas.addEventListener('click', (e) => {
 document.getElementById('btn-try').onclick      = enterTry;
 document.getElementById('btn-try-end').onclick  = exitTry;
 document.getElementById('btn-try-undo').onclick = tryUndo;
+
+// ── Export SGF ───────────────────────────────────────────────────────────────────
+// Build an SGF from the current `game` (info + optional setup + confirmed moves).
+// Provisional/tentative stones (prov:1) are skipped — they aren't real moves yet.
+const SGF_LETTERS = 'abcdefghijklmnopqrs';
+function sgfCoord(x, y) { return SGF_LETTERS[x] + SGF_LETTERS[y]; }
+function sgfEsc(s) { return String(s).replace(/[\]\\]/g, c => '\\' + c); }
+function buildSGF() {
+  const info = game.info || {};
+  const date = new Date().toISOString().slice(0, 10);
+  let sgf = '(;FF[4]GM[1]SZ[19]\n';
+  sgf += `PB[${sgfEsc(info.black || 'Black')}]\n`;
+  sgf += `PW[${sgfEsc(info.white || 'White')}]\n`;
+  if (info.komi != null) sgf += `KM[${info.komi}]\n`;
+  sgf += `DT[${date}]\n`;
+  sgf += 'AP[LiveGo:1.0]\n';
+  if (game.setup && game.setup.length) {
+    const ab = game.setup.filter(s => s.c === 1).map(s => `[${sgfCoord(s.x, s.y)}]`).join('');
+    const aw = game.setup.filter(s => s.c === 2).map(s => `[${sgfCoord(s.x, s.y)}]`).join('');
+    if (ab) sgf += `AB${ab}\n`;
+    if (aw) sgf += `AW${aw}\n`;
+  }
+  for (const m of game.moves) {
+    if (m.prov) continue;                       // skip tentative stones
+    sgf += `;${m.c === 1 ? 'B' : 'W'}[${sgfCoord(m.x, m.y)}]`;
+  }
+  sgf += ')';
+  return sgf;
+}
+async function exportSGF() {
+  const sgf = buildSGF();
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 16);
+  const filename = `livego-${stamp}.sgf`;
+  const blob = new Blob([sgf], { type: 'text/plain' });
+  // iOS Safari ignores <a download>; use the share sheet ("Save to Files"…) first.
+  if (navigator.canShare) {
+    const file = new File([blob], filename, { type: 'text/plain' });
+    if (navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file], title: filename }); return; }
+      catch (e) { if (e.name === 'AbortError') return; } // user cancelled
+    }
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+document.getElementById('btn-export').onclick = exportSGF;
 
 // ── Autoplay of newly-arrived moves ─────────────────────────────────────────────
 function stopAutoplay() { if (autoplayTimer) { clearTimeout(autoplayTimer); autoplayTimer = null; } }
