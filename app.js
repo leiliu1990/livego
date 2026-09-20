@@ -448,7 +448,7 @@ function cancelFix() {
 
 function applyFix() {
   if (!detector) return;
-  detector.setBoardState(fixBoard, fixTurn);   // resume from the corrected board
+  detector.setBoardState(fixBoard, fixTurn, true); // resume + adapt thresholds (fix stones = ground truth)
   recorder.setSetupPosition(fixBoard);         // corrected board = new SGF/broadcast start
   lastMove = null;
   fixMode = false;

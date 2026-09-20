@@ -74,6 +74,12 @@ class BoardDetector {
     this._display   = Array.from({ length: BOARD_SIZE }, () => new Array(BOARD_SIZE).fill(STONE.EMPTY)); // confirmed + provisional
     this._deltaGrid = null;        // 19×19 post-ambient deltas this frame (for stone-likeness)
 
+    // Classification thresholds start at the defaults but adapt to this board +
+    // stones + lighting after a manual fix (setBoardState with calibrate=true),
+    // using the corrected stones as ground-truth delta samples. See _recalibrate().
+    this._whiteDelta = WHITE_DELTA;
+    this._blackDelta = BLACK_DELTA;
+
     this._src    = null;
     this._warped = null;
     this._gray   = null;
@@ -133,7 +139,10 @@ class BoardDetector {
   // 19×19 array of STONE values matching the physical board; `nextTurn` is who
   // plays next. Resets the tentative machine and marks every present stone as
   // mature so detection resumes cleanly from here. Baseline (lighting) is kept.
-  setBoardState(board, nextTurn) {
+  // When `calibrate` is set (a manual fix, where the stones are ground truth),
+  // adapt the black/white delta thresholds to this board using those stones.
+  setBoardState(board, nextTurn, calibrate) {
+    if (calibrate) this._recalibrate(board);
     this._confirmed = board.map(row => row.map(v => v || STONE.EMPTY));
     this._turn = nextTurn || STONE.BLACK;
     let hasWhite = false, hasAny = false;
@@ -154,6 +163,54 @@ class BoardDetector {
     this.pendingState = null;
     this.pendingCount = 0;
     this.onFrame?.(this._display);              // redraw + republish via the normal path
+  }
+
+  // Adapt the black/white delta thresholds using manually-corrected stones as
+  // ground truth. `board` is the physical position the user just confirmed; the
+  // last frame's `_deltaGrid` holds each cell's measured (post-ambient) delta, so
+  // (board label, delta) pairs are labelled samples for THIS board + stones +
+  // lighting. Guardrails keep a noisy/occluded frame from corrupting detection:
+  //   • need a clean, settled last frame (no hand/motion)         → else keep thresholds
+  //   • drop contaminated samples: a stone that was already there when the empty
+  //     baseline was captured reads delta≈0, so only trust clear readings
+  //   • need ≥ MIN_SAMPLES per colour and clusters clearly separated from empty
+  //   • set each threshold to the midpoint of the empty-noise edge and the
+  //     faintest reliable stone, clamped to a sane range (never crossing 0)
+  _recalibrate(board) {
+    if (!this._deltaGrid) return;                       // no measured frame yet
+    if (this._occluded || this._motion > MOTION_THRESH) return; // last frame not clean
+
+    const black = [], white = [], empty = [];
+    for (let r = 0; r < BOARD_SIZE; r++)
+      for (let c = 0; c < BOARD_SIZE; c++) {
+        const d = this._deltaGrid[r * BOARD_SIZE + c];
+        if (d == null) continue;
+        const v = board[r][c];
+        if (v === STONE.BLACK) black.push(d);
+        else if (v === STONE.WHITE) white.push(d);
+        else empty.push(d);
+      }
+
+    const MIN_SAMPLES = 3, MIN_GAP = 6;
+    // Empty-cell noise band (should hug 0). Bounds where a stone threshold may sit.
+    const eHi = empty.length ? percentile(empty, 0.90) :  8;  // upper noise edge
+    const eLo = empty.length ? percentile(empty, 0.10) : -8;  // lower noise edge
+
+    // WHITE brightens (delta > 0). Drop contaminated/near-zero readings, then place
+    // the threshold midway between the empty noise ceiling and the faintest white —
+    // but only if there's room (≥ MIN_GAP) to separate the two. Clamp keeps it sane.
+    const wv = white.filter(d => d > eHi + 2);
+    if (wv.length >= MIN_SAMPLES) {
+      const wLo = percentile(wv, 0.15);                 // faintest reliable white
+      if (wLo - eHi >= MIN_GAP) this._whiteDelta = clamp((eHi + wLo) / 2, 8, 40);
+    }
+    // BLACK darkens (delta < 0), symmetric.
+    const bv = black.filter(d => d < eLo - 2);
+    if (bv.length >= MIN_SAMPLES) {
+      const bHi = percentile(bv, 0.85);                 // faintest reliable black (closest to 0)
+      if (eLo - bHi >= MIN_GAP) this._blackDelta = clamp((eLo + bHi) / 2, -110, -35);
+    }
+    console.log(`[recalibrate] white≥${this._whiteDelta.toFixed(0)} black≤${this._blackDelta.toFixed(0)} (from ${black.length}B/${white.length}W samples)`);
   }
 
   // Confirm the last still-provisional move — call before exporting the SGF at
@@ -411,8 +468,8 @@ class BoardDetector {
     // Subtract the ambient shift so only local (stone) changes count.
     const delta = sampleMean(this._gray, x, y, STONE_RADIUS) - this._baseline[r][c] - this._ambient;
 
-    if (delta < BLACK_DELTA) return STONE.BLACK;
-    if (delta > WHITE_DELTA) return STONE.WHITE;
+    if (delta < this._blackDelta) return STONE.BLACK;
+    if (delta > this._whiteDelta) return STONE.WHITE;
     return STONE.EMPTY;
   }
 
@@ -628,7 +685,7 @@ class BoardDetector {
         warpSize: WARP_SIZE,
         grid: { col: this._colPos, row: this._rowPos },
         baseline: this._baseline ? this._baseline.map(r => r.map(v => Math.round(v))) : null,
-        thresholds: { whiteDelta: WHITE_DELTA, blackDelta: BLACK_DELTA, motion: MOTION_THRESH, ageProtect: AGE_PROTECT },
+        thresholds: { whiteDelta: this._whiteDelta, blackDelta: this._blackDelta, whiteDefault: WHITE_DELTA, blackDefault: BLACK_DELTA, motion: MOTION_THRESH, ageProtect: AGE_PROTECT },
         finalBoard: flatten(this.boardState),
         frameCount: this.debug.frameNo,
       },
@@ -769,6 +826,15 @@ function medianOf(arr) {
   const m = a.length >> 1;
   return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
 }
+
+// p in [0,1]; nearest-rank percentile of a numeric array.
+function percentile(arr, p) {
+  const a = [...arr].sort((x, y) => x - y);
+  const i = Math.min(a.length - 1, Math.max(0, Math.round(p * (a.length - 1))));
+  return a[i];
+}
+
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 
 // ±1 box smoothing of a profile.
 function smoothProfile(prof, size) {
