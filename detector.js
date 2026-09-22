@@ -370,8 +370,13 @@ class BoardDetector {
   // Detect a hand/arm over the board. Diff the warped frame against the empty
   // board, remove the uniform lighting level (ambient) so a shadow doesn't count,
   // keep only solid regions (morphological open erases thin grid lines/noise),
-  // then take the largest connected blob. A hand is large AND touches the image
-  // border (the arm enters from outside); interior stone groups never do.
+  // then take the largest connected blob. A hand is large AND touches the board
+  // region's edge (the arm enters from outside); interior stone groups never do.
+  //
+  // Blob detection is confined to the ON-BOARD region (the fitted grid extent),
+  // NOT the full warped image — its outer margin holds off-board scene (table,
+  // stone bowls, people) whose large border-touching blobs used to false-trigger
+  // occlusion and skip nearly every frame.
   _computeOcclusion() {
     if (!this._baselineGray) { this._occluded = false; return; }
     if (!this._occMats) {
@@ -397,17 +402,32 @@ class BoardDetector {
     cv.threshold(M.diff, M.mask, amb + OCC_PIXEL_DELTA, 255, cv.THRESH_BINARY);
     cv.morphologyEx(M.mask, M.mask, cv.MORPH_OPEN, M.kernel);
 
-    const n = cv.connectedComponentsWithStats(M.mask, M.labels, M.stats, M.cent, 8);
-    let li = 0, larea = 0;
-    for (let i = 1; i < n; i++) {
-      const a = M.stats.intAt(i, cv.CC_STAT_AREA);
-      if (a > larea) { larea = a; li = i; }
-    }
-    let touches = false;
-    if (li) {
-      const x = M.stats.intAt(li, cv.CC_STAT_LEFT), y = M.stats.intAt(li, cv.CC_STAT_TOP);
-      const w = M.stats.intAt(li, cv.CC_STAT_WIDTH), h = M.stats.intAt(li, cv.CC_STAT_HEIGHT);
-      touches = (x <= 2 || y <= 2 || x + w >= WARP_SIZE - 2 || y + h >= WARP_SIZE - 2);
+    // Restrict to the on-board region: the fitted grid extent (corners map to the
+    // WARP_MARGIN-inset rect). Blobs outside this — off-board objects/background —
+    // are ignored, and the "touches border" test is against this region's edges,
+    // which an arm reaching onto the board still crosses.
+    const gx0 = this._colPos ? this._colPos[0] : WARP_MARGIN;
+    const gx1 = this._colPos ? this._colPos[BOARD_SIZE - 1] : WARP_SIZE - WARP_MARGIN;
+    const gy0 = this._rowPos ? this._rowPos[0] : WARP_MARGIN;
+    const gy1 = this._rowPos ? this._rowPos[BOARD_SIZE - 1] : WARP_SIZE - WARP_MARGIN;
+    const bx = Math.max(0, Math.round(gx0)), by = Math.max(0, Math.round(gy0));
+    const bw = Math.min(WARP_SIZE, Math.round(gx1)) - bx;
+    const bh = Math.min(WARP_SIZE, Math.round(gy1)) - by;
+
+    let li = 0, larea = 0, touches = false;
+    if (bw >= 10 && bh >= 10) {
+      const sub = M.mask.roi(new cv.Rect(bx, by, bw, bh));
+      const n = cv.connectedComponentsWithStats(sub, M.labels, M.stats, M.cent, 8);
+      for (let i = 1; i < n; i++) {
+        const a = M.stats.intAt(i, cv.CC_STAT_AREA);
+        if (a > larea) { larea = a; li = i; }
+      }
+      if (li) {
+        const x = M.stats.intAt(li, cv.CC_STAT_LEFT), y = M.stats.intAt(li, cv.CC_STAT_TOP);
+        const w = M.stats.intAt(li, cv.CC_STAT_WIDTH), h = M.stats.intAt(li, cv.CC_STAT_HEIGHT);
+        touches = (x <= 2 || y <= 2 || x + w >= bw - 2 || y + h >= bh - 2);
+      }
+      sub.delete();
     }
     this._occBlob  = larea;
     this._occluded = (larea >= OCC_BLOB_MIN && touches);
