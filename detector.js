@@ -72,7 +72,13 @@ class BoardDetector {
     this._tentative = {};          // "r,c" -> colour: the provisional move, for overlay marking
     this._provisional = null;      // {r,c,color}: best guess for the current unconfirmed move
     this._display   = Array.from({ length: BOARD_SIZE }, () => new Array(BOARD_SIZE).fill(STONE.EMPTY)); // confirmed + provisional
-    this._deltaGrid = null;        // 19×19 post-ambient deltas this frame (for stone-likeness)
+    this._deltaGrid = null;        // (legacy) 19×19 post-ambient deltas — unused by HSV path
+    this._rgb   = null;            // warped RGB (for HSV conversion)
+    this._hsv   = null;            // warped HSV: classification works on S (wood/stone) + V (black/white)
+    this._sGrid = null;            // 19×19 median saturation this frame
+    this._vGrid = null;            // 19×19 median value this frame
+    this._sThr  = 0;               // self-calibrated saturation split (wood vs stone)
+    this._vThr  = 0;               // self-calibrated value split (black vs white)
 
     // Classification thresholds start at the defaults but adapt to this board +
     // stones + lighting after a manual fix (setBoardState with calibrate=true),
@@ -306,12 +312,12 @@ class BoardDetector {
     }
     this._gray.copyTo(this._prevGray);
 
-    // First good frame: the board is empty. Lock the grid to the real lines and
-    // record each intersection's empty brightness. Commit no moves this frame.
-    if (!this._baseline) {
+    // First good frame: lock the grid to the real lines and snapshot the scene for
+    // occlusion diffing. HSV classification needs NO empty board, so the board may
+    // already hold stones (mid-game start works out of the box). Commit nothing yet.
+    if (!this._colPos) {
       this._fitGrid();
-      this._captureBaseline();
-      this._baselineGray = this._gray.clone(); // full empty-board image for occlusion
+      this._baselineGray = this._gray.clone(); // static-scene reference for occlusion
       return null;
     }
 
@@ -319,51 +325,78 @@ class BoardDetector {
     // it, so we never diff an occluded view. Computed before classification.
     this._computeOcclusion();
 
-    // Estimate the ambient lighting shift so a uniform change (e.g. a shadow
-    // falling over the whole board) doesn't look like stones. Each cell's delta
-    // vs baseline = ambient shift (shared by all cells) + any stone (a few cells).
-    // The MEDIAN delta is the shift: most cells are empty, so stones are outliers
-    // that the median ignores. Subtracting it re-references the baseline to the
-    // current lighting. Classification then only fires on *local* changes.
-    const deltas = [];
-    for (let r = 0; r < BOARD_SIZE; r++)
-      for (let c = 0; c < BOARD_SIZE; c++) {
-        const { x, y } = this._intersectionPx(r, c);
-        deltas.push(sampleMean(this._gray, x, y, STONE_RADIUS) - this._baseline[r][c]);
-      }
-    this._ambient = medianOf(deltas);
-
-    // Post-ambient delta grid, kept for candidate stone-likeness comparison.
-    this._deltaGrid = new Array(BOARD_SIZE * BOARD_SIZE);
-    for (let i = 0; i < deltas.length; i++) this._deltaGrid[i] = deltas[i] - this._ambient;
-
-    const state = [];
-    for (let r = 0; r < BOARD_SIZE; r++) {
-      const row = [];
-      for (let c = 0; c < BOARD_SIZE; c++) row.push(this._classifyIntersection(r, c));
-      state.push(row);
-    }
+    // Classify every intersection from HSV colour (no empty-board baseline needed).
+    const state = this._classifyBoardHSV();
 
     // Stage this frame's debug data (finalized with an event in _reconcile).
     // Guarded so a debug error never breaks detection.
     try {
       if (this.debug.enabled) {
-        const dg = new Array(BOARD_SIZE * BOARD_SIZE);
-        for (let i = 0; i < deltas.length; i++) dg[i] = Math.round(deltas[i] - this._ambient);
-        this._dbgDeltas = dg;
         this._dbgPending = {
           i: this.debug.frameNo,
           t: Date.now() - this.debug.t0,
           motion: +this._motion.toFixed(3),
           occ: this._occluded,
           occBlob: this._occBlob,
-          amb: +this._ambient.toFixed(1),
-          deltas: dg,
+          sThr: Math.round(this._sThr), vThr: Math.round(this._vThr),
+          sat: this._sGrid.map(v => Math.round(v)),
+          val: this._vGrid.map(v => Math.round(v)),
+          deltas: this._vGrid.map(v => Math.round(v - 128)), // back-compat: V around mid-grey
           state: flatten(state),
         };
       }
     } catch (e) { console.warn('debug stage error:', e.message); }
 
+    return state;
+  }
+
+  // Classify all 361 intersections from colour, no empty-board baseline required.
+  // A stone is ACHROMATIC (low saturation); wood is a saturated warm colour. So
+  // saturation S splits wood from stones, and value V splits black from white —
+  // both thresholds self-calibrated from this frame's own 361 samples (k-means),
+  // so it adapts to any board/stones/lighting. Median sampling ignores the small
+  // specular highlight on a glossy stone. Returns a 19×19 STONE array.
+  _classifyBoardHSV() {
+    if (!this._rgb) { this._rgb = new cv.Mat(); this._hsv = new cv.Mat(); }
+    cv.cvtColor(this._warped, this._rgb, cv.COLOR_RGBA2RGB);
+    cv.cvtColor(this._rgb, this._hsv, cv.COLOR_RGB2HSV); // H:0-180 S:0-255 V:0-255
+    const data = this._hsv.data, cols = this._hsv.cols, rows = this._hsv.rows;
+
+    const N2 = BOARD_SIZE * BOARD_SIZE;
+    const sGrid = new Array(N2), vGrid = new Array(N2);
+    for (let r = 0; r < BOARD_SIZE; r++)
+      for (let c = 0; c < BOARD_SIZE; c++) {
+        const { x, y } = this._intersectionPx(r, c);
+        const sv = sampleMedianSV(data, cols, rows, x, y, STONE_RADIUS);
+        sGrid[r * BOARD_SIZE + c] = sv[0];
+        vGrid[r * BOARD_SIZE + c] = sv[1];
+      }
+    this._sGrid = sGrid; this._vGrid = vGrid;
+
+    const state = Array.from({ length: BOARD_SIZE }, () => new Array(BOARD_SIZE).fill(STONE.EMPTY));
+
+    // Wood vs stone by saturation. Two well-separated clusters with a genuinely
+    // low one ⇒ stones present; otherwise the board is all wood (empty).
+    const sk = kmeans2(sGrid);
+    const hasStones = sk.ok && sk.gap >= 40 && sk.loC <= 80;
+    this._sThr = hasStones ? sk.thr : 0;
+    if (!hasStones) { this._vThr = 0; return state; }
+
+    // Black vs white by value among stone cells. If they don't split into two,
+    // all stones are one colour — decide by whether that single cluster is dark.
+    const stoneV = [];
+    for (let i = 0; i < N2; i++) if (sGrid[i] < this._sThr) stoneV.push(vGrid[i]);
+    const vk = kmeans2(stoneV);
+    let vThr;
+    if (vk.ok && vk.gap >= 45) vThr = vk.thr;
+    else vThr = (medianOf(stoneV) < 128) ? 256 : -1; // all-black → all < 256; all-white → none
+    this._vThr = vThr;
+
+    for (let r = 0; r < BOARD_SIZE; r++)
+      for (let c = 0; c < BOARD_SIZE; c++) {
+        const i = r * BOARD_SIZE + c;
+        if (sGrid[i] < this._sThr) state[r][c] = vGrid[i] < vThr ? STONE.BLACK : STONE.WHITE;
+      }
     return state;
   }
 
@@ -657,18 +690,19 @@ class BoardDetector {
     if (m.color === STONE.WHITE) this._committedWhite = true;
   }
 
-  // Among competing same-colour candidates, pick the one whose brightness delta
+  // Among competing same-colour candidates, pick the one whose value (brightness)
   // is closest to confirmed stones of that colour (adaptive stone-likeness).
   _mostStoneLike(cands) {
+    if (!this._vGrid) return cands[0];
     const color = cands[0].color;
     const refs = [];
     for (let r = 0; r < BOARD_SIZE; r++)
       for (let c = 0; c < BOARD_SIZE; c++)
-        if (this._confirmed[r][c] === color) refs.push(this._deltaGrid[r * BOARD_SIZE + c]);
-    const ref = refs.length ? medianOf(refs) : (color === STONE.BLACK ? BLACK_DELTA * 1.6 : WHITE_DELTA * 3);
+        if (this._confirmed[r][c] === color) refs.push(this._vGrid[r * BOARD_SIZE + c]);
+    const ref = refs.length ? medianOf(refs) : (color === STONE.BLACK ? 45 : 210);
     let best = cands[0], bestDiff = Infinity;
     for (const m of cands) {
-      const d = this._deltaGrid[m.r * BOARD_SIZE + m.c];
+      const d = this._vGrid[m.r * BOARD_SIZE + m.c];
       const diff = Math.abs(d - ref);
       if (diff < bestDiff) { bestDiff = diff; best = m; }
     }
@@ -793,6 +827,8 @@ class BoardDetector {
     if (this._prevGray) { this._prevGray.delete(); this._prevGray = null; }
     if (this._diff)     { this._diff.delete();     this._diff     = null; }
     if (this._diffMask) { this._diffMask.delete(); this._diffMask = null; }
+    if (this._rgb)      { this._rgb.delete();      this._rgb      = null; }
+    if (this._hsv)      { this._hsv.delete();      this._hsv      = null; }
     if (this._baselineGray) { this._baselineGray.delete(); this._baselineGray = null; }
     if (this._occMats) {
       for (const m of Object.values(this._occMats)) m.delete();
@@ -873,6 +909,51 @@ function medianOf(arr) {
   const a = [...arr].sort((p, q) => p - q);
   const m = a.length >> 1;
   return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+}
+
+// Median saturation & value within a circular region of an interleaved HSV image
+// (3 channels/pixel: H,S,V). Median (not mean) ignores a glossy stone's small
+// specular highlight. Returns [medS, medV] in 0-255.
+function sampleMedianSV(data, cols, rows, cx, cy, radius) {
+  const r2 = radius * radius;
+  const x0 = Math.max(0, cx - radius), x1 = Math.min(cols - 1, cx + radius);
+  const y0 = Math.max(0, cy - radius), y1 = Math.min(rows - 1, cy + radius);
+  const S = [], V = [];
+  for (let y = y0; y <= y1; y++) {
+    const dy2 = (y - cy) * (y - cy), row = y * cols;
+    for (let x = x0; x <= x1; x++) {
+      if ((x - cx) * (x - cx) + dy2 <= r2) {
+        const idx = (row + x) * 3;
+        S.push(data[idx + 1]); V.push(data[idx + 2]);
+      }
+    }
+  }
+  if (!S.length) return [0, 0];
+  return [medianOf(S), medianOf(V)];
+}
+
+// 1-D two-means (Lloyd's) over a numeric array. Returns the two cluster centres,
+// their gap, and the split threshold. `ok:false` when there's too little data or
+// spread to cluster. Used to self-calibrate the S (wood/stone) and V (black/white)
+// thresholds from each frame's own samples — no fixed constants, no baseline.
+function kmeans2(vals) {
+  const n = vals.length;
+  if (n < 4) return { ok: false };
+  let lo = Infinity, hi = -Infinity;
+  for (const v of vals) { if (v < lo) lo = v; if (v > hi) hi = v; }
+  if (hi - lo < 1) return { ok: false };
+  let c0 = lo, c1 = hi;
+  for (let it = 0; it < 15; it++) {
+    let s0 = 0, n0 = 0, s1 = 0, n1 = 0;
+    for (const v of vals) {
+      if (Math.abs(v - c0) <= Math.abs(v - c1)) { s0 += v; n0++; } else { s1 += v; n1++; }
+    }
+    const a = n0 ? s0 / n0 : c0, b = n1 ? s1 / n1 : c1;
+    if (Math.abs(a - c0) < 0.3 && Math.abs(b - c1) < 0.3) { c0 = a; c1 = b; break; }
+    c0 = a; c1 = b;
+  }
+  const loC = Math.min(c0, c1), hiC = Math.max(c0, c1);
+  return { ok: true, loC, hiC, thr: (loC + hiC) / 2, gap: hiC - loC };
 }
 
 // p in [0,1]; nearest-rank percentile of a numeric array.
