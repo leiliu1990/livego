@@ -28,13 +28,9 @@ const WARP_STEP   = (WARP_SIZE - 2 * WARP_MARGIN) / (BOARD_SIZE - 1); // px betw
 const STONE_RADIUS = Math.round(WARP_STEP * 0.45);                   // sampling radius ≈ 45% of one grid cell
 const OCC_BLOB_MIN = Math.round(4 * Math.PI * STONE_RADIUS * STONE_RADIUS); // blob ≥ ~4 stones ⇒ not a stone (a hand)
 
-// Stones are classified by how much each intersection's brightness CHANGES from
-// the empty board captured at the start — not by absolute brightness. This is
-// essential: bright wood grain overlaps white-stone brightness (both ~210-240),
-// so a global threshold classifies wood as white. But wood doesn't *change* from
-// its own empty baseline, while a white stone brightens its cell markedly.
-const WHITE_DELTA = 18;   // ≥ this brightening vs empty ⇒ white stone
-const BLACK_DELTA = -70;  // ≤ this darkening  vs empty ⇒ black stone
+// Stones are classified from HSV colour relative to the wood measured live each
+// frame (see _classifyBoardHSV): saturation splits wood from stones, value splits
+// black from white. No empty-board baseline, no fixed colour constants.
 
 // A stone is "mature" after surviving this many valid frames. Mature stones are
 // protected from false disappearance (Go rules: only leave by capture); younger
@@ -72,7 +68,6 @@ class BoardDetector {
     this._tentative = {};          // "r,c" -> colour: the provisional move, for overlay marking
     this._provisional = null;      // {r,c,color}: best guess for the current unconfirmed move
     this._display   = Array.from({ length: BOARD_SIZE }, () => new Array(BOARD_SIZE).fill(STONE.EMPTY)); // confirmed + provisional
-    this._deltaGrid = null;        // (legacy) 19×19 post-ambient deltas — unused by HSV path
     this._rgb   = null;            // warped RGB (for HSV conversion)
     this._hsv   = null;            // warped HSV: classification works on S (wood/stone) + V (black/white)
     this._sGrid = null;            // 19×19 median saturation this frame
@@ -82,12 +77,6 @@ class BoardDetector {
     this._woodS = 0;               // live-measured wood saturation reference
     this._woodV = 0;               // live-measured wood value reference
 
-    // Classification thresholds start at the defaults but adapt to this board +
-    // stones + lighting after a manual fix (setBoardState with calibrate=true),
-    // using the corrected stones as ground-truth delta samples. See _recalibrate().
-    this._whiteDelta = WHITE_DELTA;
-    this._blackDelta = BLACK_DELTA;
-
     this._src    = null;
     this._warped = null;
     this._gray   = null;
@@ -95,15 +84,12 @@ class BoardDetector {
     this._diff     = null;
     this._diffMask = null;
     this._motion   = Infinity;
-    this._ambient  = 0;     // per-frame global lighting shift vs baseline
 
     this._occluded = false; // is a hand/arm covering part of the board this frame?
     this._occBlob  = 0;     // largest foreign blob area (px), for debug
     this._occMats  = null;  // lazily-allocated scratch mats for occlusion
 
-    // Empty-board reference, established from the first good frame.
-    this._baseline     = null;             // 19×19 brightness of the empty board
-    this._baselineGray = null;             // full warped gray of the empty board (for occlusion)
+    this._baselineGray = null;             // static-scene warped gray for occlusion diffing
     this._colPos       = null;             // fitted grid line x-positions (in warp px)
     this._rowPos       = null;             // fitted grid line y-positions
 
@@ -146,11 +132,8 @@ class BoardDetector {
   // Replace the confirmed position wholesale after a manual fix. `board` is a
   // 19×19 array of STONE values matching the physical board; `nextTurn` is who
   // plays next. Resets the tentative machine and marks every present stone as
-  // mature so detection resumes cleanly from here. Baseline (lighting) is kept.
-  // When `calibrate` is set (a manual fix, where the stones are ground truth),
-  // adapt the black/white delta thresholds to this board using those stones.
-  setBoardState(board, nextTurn, calibrate) {
-    if (calibrate) { this._recalibrate(board); this._fixupBaseline(board); }
+  // mature so detection resumes cleanly from here.
+  setBoardState(board, nextTurn) {
     this._confirmed = board.map(row => row.map(v => v || STONE.EMPTY));
     this._turn = nextTurn || STONE.BLACK;
     let hasWhite = false, hasAny = false;
@@ -173,92 +156,11 @@ class BoardDetector {
     this.onFrame?.(this._display);              // redraw + republish via the normal path
   }
 
-  // Adapt the black/white delta thresholds using manually-corrected stones as
-  // ground truth. `board` is the physical position the user just confirmed; the
-  // last frame's `_deltaGrid` holds each cell's measured (post-ambient) delta, so
-  // (board label, delta) pairs are labelled samples for THIS board + stones +
-  // lighting. Guardrails keep a noisy/occluded frame from corrupting detection:
-  //   • need a clean, settled last frame (no hand/motion)         → else keep thresholds
-  //   • drop contaminated samples: a stone that was already there when the empty
-  //     baseline was captured reads delta≈0, so only trust clear readings
-  //   • need ≥ MIN_SAMPLES per colour and clusters clearly separated from empty
-  //   • set each threshold to the midpoint of the empty-noise edge and the
-  //     faintest reliable stone, clamped to a sane range (never crossing 0)
-  _recalibrate(board) {
-    if (!this._deltaGrid) return;                       // no measured frame yet
-    if (this._occluded || this._motion > MOTION_THRESH) return; // last frame not clean
-
-    const black = [], white = [], empty = [];
-    for (let r = 0; r < BOARD_SIZE; r++)
-      for (let c = 0; c < BOARD_SIZE; c++) {
-        const d = this._deltaGrid[r * BOARD_SIZE + c];
-        if (d == null) continue;
-        const v = board[r][c];
-        if (v === STONE.BLACK) black.push(d);
-        else if (v === STONE.WHITE) white.push(d);
-        else empty.push(d);
-      }
-
-    const MIN_SAMPLES = 3, MIN_GAP = 6;
-    // Empty-cell noise band (should hug 0). Bounds where a stone threshold may sit.
-    const eHi = empty.length ? percentile(empty, 0.90) :  8;  // upper noise edge
-    const eLo = empty.length ? percentile(empty, 0.10) : -8;  // lower noise edge
-
-    // WHITE brightens (delta > 0). Drop contaminated/near-zero readings, then place
-    // the threshold midway between the empty noise ceiling and the faintest white —
-    // but only if there's room (≥ MIN_GAP) to separate the two. Clamp keeps it sane.
-    const wv = white.filter(d => d > eHi + 2);
-    if (wv.length >= MIN_SAMPLES) {
-      const wLo = percentile(wv, 0.15);                 // faintest reliable white
-      if (wLo - eHi >= MIN_GAP) this._whiteDelta = clamp((eHi + wLo) / 2, 8, 40);
-    }
-    // BLACK darkens (delta < 0), symmetric.
-    const bv = black.filter(d => d < eLo - 2);
-    if (bv.length >= MIN_SAMPLES) {
-      const bHi = percentile(bv, 0.85);                 // faintest reliable black (closest to 0)
-      if (eLo - bHi >= MIN_GAP) this._blackDelta = clamp((eLo + bHi) / 2, -110, -35);
-    }
-    console.log(`[recalibrate] white≥${this._whiteDelta.toFixed(0)} black≤${this._blackDelta.toFixed(0)} (from ${black.length}B/${white.length}W samples)`);
-  }
-
-  // Start-mid-game support. The empty baseline is captured on the first frame,
-  // which assumes an empty board. If stones are already present then, those
-  // cells' baselines hold STONE brightness, not wood — so a later removal reads
-  // a huge delta and misclassifies (a lifted black → bright wood → phantom white).
-  // After a fix, reset any occupied cell whose baseline is far from the wood level
-  // (median of the now-empty cells) back to that wood level. Cells whose baseline
-  // already matches wood (a normal mid-game fix, baseline captured empty) are left
-  // untouched — their true reading is better than an estimate. Black contamination
-  // (~150 below wood) is always caught; that's the only case that misclassifies.
-  _fixupBaseline(board) {
-    if (!this._baseline) return;
-    const woodVals = [];
-    for (let r = 0; r < BOARD_SIZE; r++)
-      for (let c = 0; c < BOARD_SIZE; c++)
-        if (!board[r][c]) woodVals.push(this._baseline[r][c]);
-    if (woodVals.length < 30) return;        // too few empty cells to estimate wood
-    const wood = medianOf(woodVals);
-    const K = 45;                            // deviation beyond which a baseline is "a stone, not wood"
-    let fixed = 0;
-    for (let r = 0; r < BOARD_SIZE; r++)
-      for (let c = 0; c < BOARD_SIZE; c++)
-        if (board[r][c] && Math.abs(this._baseline[r][c] - wood) > K) {
-          this._baseline[r][c] = wood;
-          fixed++;
-        }
-    if (fixed) console.log(`[baseline fixup] reset ${fixed} contaminated cell(s) to wood≈${wood.toFixed(0)}`);
-  }
 
   // Confirm the last still-provisional move — call before exporting the SGF at
   // game end, since a move is normally only confirmed when the opponent replies.
   finalizePending() {
     if (this._provisional) { this._confirmMove(this._provisional); this._provisional = null; }
-  }
-
-  undoLastMove(previousState) {
-    this.boardState   = previousState;
-    this.pendingState = null;
-    this.pendingCount = 0;
   }
 
   // ── Internal ──────────────────────────────────────────────────────────────
@@ -529,36 +431,14 @@ class BoardDetector {
     this._rowPos = refineUniformGrid(rowDarkness(this._gray), BOARD_SIZE);
   }
 
-  // Record the empty-board brightness at every intersection.
-  _captureBaseline() {
-    this._baseline = [];
-    for (let r = 0; r < BOARD_SIZE; r++) {
-      const row = [];
-      for (let c = 0; c < BOARD_SIZE; c++) {
-        const { x, y } = this._intersectionPx(r, c);
-        row.push(sampleMean(this._gray, x, y, STONE_RADIUS));
-      }
-      this._baseline.push(row);
-    }
-  }
-
+  // Warp-pixel coordinates of intersection (r,c): the fitted grid line positions,
+  // or the ideal uniform grid before the grid has been fit.
   _intersectionPx(r, c) {
     if (this._colPos) return { x: this._colPos[c], y: this._rowPos[r] };
-    // Fallback before the grid is fitted (used only during baseline capture setup).
     return {
       x: Math.round(WARP_MARGIN + c * WARP_STEP),
       y: Math.round(WARP_MARGIN + r * WARP_STEP),
     };
-  }
-
-  _classifyIntersection(r, c) {
-    const { x, y } = this._intersectionPx(r, c);
-    // Subtract the ambient shift so only local (stone) changes count.
-    const delta = sampleMean(this._gray, x, y, STONE_RADIUS) - this._baseline[r][c] - this._ambient;
-
-    if (delta < this._blackDelta) return STONE.BLACK;
-    if (delta > this._whiteDelta) return STONE.WHITE;
-    return STONE.EMPTY;
   }
 
   _reconcile(rawState) {
@@ -728,7 +608,7 @@ class BoardDetector {
     if (!this.debug.enabled) return;
     const nB = countColor(this.boardState, STONE.BLACK);
     const nW = countColor(this.boardState, STONE.WHITE);
-    this.debug.last = { ev: event, motion: this._motion, occ: this._occluded, amb: this._ambient, nB, nW };
+    this.debug.last = { ev: event, motion: this._motion, occ: this._occluded, woodS: Math.round(this._woodS || 0), woodV: Math.round(this._woodV || 0), nB, nW };
 
     const f = this._dbgPending;
     if (!f) return;
@@ -766,15 +646,14 @@ class BoardDetector {
   getDebugJSON() {
     return JSON.stringify({
       meta: {
-        version: 'v20',
+        version: 'hsv-A',
         savedAt: new Date().toISOString(),
         vid: { w: this.displayMeta?.vidW, h: this.displayMeta?.vidH },
         disp: { w: this.displayMeta?.dispW, h: this.displayMeta?.dispH },
         corners: this.corners,
         warpSize: WARP_SIZE,
         grid: { col: this._colPos, row: this._rowPos },
-        baseline: this._baseline ? this._baseline.map(r => r.map(v => Math.round(v))) : null,
-        thresholds: { whiteDelta: this._whiteDelta, blackDelta: this._blackDelta, whiteDefault: WHITE_DELTA, blackDefault: BLACK_DELTA, motion: MOTION_THRESH, ageProtect: AGE_PROTECT },
+        thresholds: { motion: MOTION_THRESH, ageProtect: AGE_PROTECT },
         finalBoard: flatten(this.boardState),
         frameCount: this.debug.frameNo,
       },
@@ -854,29 +733,6 @@ function captureFrame(video) {
   return c;
 }
 
-// Fast mean brightness of pixels within a circle, using the raw data array.
-function sampleMean(grayMat, cx, cy, radius) {
-  let sum = 0, count = 0;
-  const r2   = radius * radius;
-  const data = grayMat.data;
-  const cols = grayMat.cols;
-  const x0   = Math.max(0, cx - radius);
-  const x1   = Math.min(cols - 1, cx + radius);
-  const y0   = Math.max(0, cy - radius);
-  const y1   = Math.min(grayMat.rows - 1, cy + radius);
-
-  for (let y = y0; y <= y1; y++) {
-    const dy2 = (y - cy) ** 2;
-    const row = y * cols;
-    for (let x = x0; x <= x1; x++) {
-      if ((x - cx) ** 2 + dy2 <= r2) {
-        sum += data[row + x];
-        count++;
-      }
-    }
-  }
-  return count > 0 ? sum / count : 128;
-}
 
 // ── Grid fitting ────────────────────────────────────────────────────────────────
 // Locate the board's real grid lines in the warped image. For each column we take
@@ -938,39 +794,6 @@ function sampleMedianSV(data, cols, rows, cx, cy, radius) {
   if (!S.length) return [0, 0];
   return [medianOf(S), medianOf(V)];
 }
-
-// 1-D two-means (Lloyd's) over a numeric array. Returns the two cluster centres,
-// their gap, and the split threshold. `ok:false` when there's too little data or
-// spread to cluster. Used to self-calibrate the S (wood/stone) and V (black/white)
-// thresholds from each frame's own samples — no fixed constants, no baseline.
-function kmeans2(vals) {
-  const n = vals.length;
-  if (n < 4) return { ok: false };
-  let lo = Infinity, hi = -Infinity;
-  for (const v of vals) { if (v < lo) lo = v; if (v > hi) hi = v; }
-  if (hi - lo < 1) return { ok: false };
-  let c0 = lo, c1 = hi;
-  for (let it = 0; it < 15; it++) {
-    let s0 = 0, n0 = 0, s1 = 0, n1 = 0;
-    for (const v of vals) {
-      if (Math.abs(v - c0) <= Math.abs(v - c1)) { s0 += v; n0++; } else { s1 += v; n1++; }
-    }
-    const a = n0 ? s0 / n0 : c0, b = n1 ? s1 / n1 : c1;
-    if (Math.abs(a - c0) < 0.3 && Math.abs(b - c1) < 0.3) { c0 = a; c1 = b; break; }
-    c0 = a; c1 = b;
-  }
-  const loC = Math.min(c0, c1), hiC = Math.max(c0, c1);
-  return { ok: true, loC, hiC, thr: (loC + hiC) / 2, gap: hiC - loC };
-}
-
-// p in [0,1]; nearest-rank percentile of a numeric array.
-function percentile(arr, p) {
-  const a = [...arr].sort((x, y) => x - y);
-  const i = Math.min(a.length - 1, Math.max(0, Math.round(p * (a.length - 1))));
-  return a[i];
-}
-
-function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
 
 // ±1 box smoothing of a profile.
 function smoothProfile(prof, size) {
