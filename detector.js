@@ -77,8 +77,10 @@ class BoardDetector {
     this._hsv   = null;            // warped HSV: classification works on S (wood/stone) + V (black/white)
     this._sGrid = null;            // 19×19 median saturation this frame
     this._vGrid = null;            // 19×19 median value this frame
-    this._sThr  = 0;               // self-calibrated saturation split (wood vs stone)
-    this._vThr  = 0;               // self-calibrated value split (black vs white)
+    this._sThr  = 0;               // white/wood saturation split (0.5·woodS)
+    this._vThr  = 0;               // black/wood value split (0.6·woodV)
+    this._woodS = 0;               // live-measured wood saturation reference
+    this._woodV = 0;               // live-measured wood value reference
 
     // Classification thresholds start at the defaults but adapt to this board +
     // stones + lighting after a manual fix (setBoardState with calibrate=true),
@@ -339,6 +341,7 @@ class BoardDetector {
           occ: this._occluded,
           occBlob: this._occBlob,
           sThr: Math.round(this._sThr), vThr: Math.round(this._vThr),
+          woodS: Math.round(this._woodS || 0), woodV: Math.round(this._woodV || 0),
           sat: this._sGrid.map(v => Math.round(v)),
           val: this._vGrid.map(v => Math.round(v)),
           deltas: this._vGrid.map(v => Math.round(v - 128)), // back-compat: V around mid-grey
@@ -375,27 +378,31 @@ class BoardDetector {
 
     const state = Array.from({ length: BOARD_SIZE }, () => new Array(BOARD_SIZE).fill(STONE.EMPTY));
 
-    // Wood vs stone by saturation. Two well-separated clusters with a genuinely
-    // low one ⇒ stones present; otherwise the board is all wood (empty).
-    const sk = kmeans2(sGrid);
-    const hasStones = sk.ok && sk.gap >= 40 && sk.loC <= 80;
-    this._sThr = hasStones ? sk.thr : 0;
-    if (!hasStones) { this._vThr = 0; return state; }
+    // Wood reference (method A). Wood is the high-saturation material, so cells at or
+    // above the 60th saturation percentile are wood (holds up to ~60% stone density).
+    // Their median S,V characterise wood for THIS frame's board+lighting — measured
+    // live, no fixed colour constant, no "learning" of a specific board. (k-means on
+    // the grid was tried and abandoned: on sparse boards it splits the big wood
+    // cluster instead of isolating the few stones, so stones were missed.)
+    const sSorted = [...sGrid].sort((a, b) => a - b);
+    const p60 = sSorted[Math.floor(N2 * 0.6)];
+    const woodSvals = [], woodVvals = [];
+    for (let i = 0; i < N2; i++) if (sGrid[i] >= p60) { woodSvals.push(sGrid[i]); woodVvals.push(vGrid[i]); }
+    const woodS = medianOf(woodSvals), woodV = medianOf(woodVvals);
+    this._woodS = woodS; this._woodV = woodV;
+    this._sThr = 0.50 * woodS; this._vThr = 0.60 * woodV; // exposed for debug/overlay
+    if (woodS < 25 || woodV < 25) return state;          // degenerate frame → no stones
 
-    // Black vs white by value among stone cells. If they don't split into two,
-    // all stones are one colour — decide by whether that single cluster is dark.
-    const stoneV = [];
-    for (let i = 0; i < N2; i++) if (sGrid[i] < this._sThr) stoneV.push(vGrid[i]);
-    const vk = kmeans2(stoneV);
-    let vThr;
-    if (vk.ok && vk.gap >= 45) vThr = vk.thr;
-    else vThr = (medianOf(stoneV) < 128) ? 256 : -1; // all-black → all < 256; all-white → none
-    this._vThr = vThr;
-
+    // Physical ratios relative to wood (generalize across boards): black is much
+    // darker than wood AND not a saturated shadowed-wood cell; white is much less
+    // saturated than wood AND bright. An empty board clears neither → no stones.
+    const blackV = 0.60 * woodV, blackS = 0.70 * woodS;
+    const whiteS = 0.50 * woodS, whiteV = 0.60 * woodV;
     for (let r = 0; r < BOARD_SIZE; r++)
       for (let c = 0; c < BOARD_SIZE; c++) {
-        const i = r * BOARD_SIZE + c;
-        if (sGrid[i] < this._sThr) state[r][c] = vGrid[i] < vThr ? STONE.BLACK : STONE.WHITE;
+        const i = r * BOARD_SIZE + c, s = sGrid[i], v = vGrid[i];
+        if (v < blackV && s < blackS) state[r][c] = STONE.BLACK;
+        else if (s < whiteS && v > whiteV) state[r][c] = STONE.WHITE;
       }
     return state;
   }

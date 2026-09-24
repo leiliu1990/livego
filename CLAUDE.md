@@ -52,19 +52,29 @@ Cache-busting: `index.html`/`viewer.html` load assets with a `?v=N` query string
 
 ## Detection algorithm (detector.js)
 
-**Per-intersection empty baseline — the board is NOT assumed uniform.** On the first good frame (assumed empty), each of the 361 crossings' brightness is sampled and stored in `_baseline[r][c]` (`_captureBaseline`). The full empty-board gray image is also kept as `_baselineGray` (used only for occlusion). Every crossing is thus referenced to *its own* empty appearance, so wood grain / a grid line through the cell cancels out.
+**Design goal:** work on *most* boards and stones with only *slight* colour/lighting variation — never hardcode or "learn" one specific board. Reliable invariants the algorithm may exploit: stones are round, the board is square, the grid is regular. All colour thresholds are derived *relative to the wood measured live in the current frame*, so there are no fixed colour constants.
 
-**Classification by delta, not absolute brightness:** each frame, `delta = sampleMean(cell) − _baseline[r][c] − _ambient`. `_ambient` is the median of all cells' deltas (most cells are empty, so the median is the global lighting shift; stones are outliers it ignores). Then: `delta < _blackDelta ⇒ black`, `delta > _whiteDelta ⇒ white`, else empty. This is essential because bright wood grain overlaps white-stone brightness in absolute terms.
+**Colour classification, not brightness-vs-baseline (HSV).** A stone is *achromatic* (low saturation); wood is a *saturated warm colour*. So saturation `S` separates wood from stones and value `V` separates black from white — and, crucially, **no empty-board baseline is needed** (mid-game start works; no baseline contamination). Each frame the warped board is converted to HSV (`_classifyBoardHSV`); for each of the 361 intersections a disk is sampled and its **median** S and V taken (`sampleMedianSV`) — median ignores the small specular highlight on a glossy stone.
 
-**Adaptive thresholds:** `_whiteDelta`/`_blackDelta` start at `WHITE_DELTA`/`BLACK_DELTA` but adapt to the board after a manual fix (`_recalibrate`), using the corrected stones as ground-truth delta samples — this targets low-contrast white stones on pale (e.g. bamboo) boards. Guardrails: clean/settled frame only, drop near-zero contaminated samples, ≥3 samples per colour, require separation from the empty-noise band, clamp so thresholds never cross 0.
+**Wood-relative thresholds (method A — current).** Earlier we tried 1-D k-means to split wood/stone, but on *sparse* boards k-means splits the large wood cluster (wide grain spread) instead of isolating the few stones → stones missed. Instead, anchor on the wood: wood is the high-saturation material, so estimate `woodS`,`woodV` = median S,V of the top-saturation cells (cells with `S ≥ P60`, which are wood at any stone density up to ~60%). Then per cell:
+- **black** if `V < 0.60·woodV` **and** `S < 0.70·woodS` (dark, and not a saturated shadowed-wood cell);
+- **white** if `S < 0.50·woodS` **and** `V > 0.60·woodV` (much less saturated than wood, and bright);
+- else **empty** (wood).
+These are physical ratios (black is much darker than wood; white is much less saturated), so they generalize across boards; the absolute anchors `woodS`/`woodV` are re-measured every frame. An empty board yields no stones (nothing clears the ratios).
+
+**Planned backups (not yet built):**
+- **(B) Pre-game calibration stones.** At setup, place a known black + white stone at designated points; the app measures the *actual* (S,V) of black, white, and wood for the current board/lighting and sets the split thresholds at the measured midpoints. This is per-session measurement (a white-balance card), NOT overfitting to one board — it's the most robust option for unusual boards (dark wood, tinted stones) where the fixed ratios in A might not hold. A overrides → B measured values when available.
+- **(C) Round-shape check.** Verify an accepted stone cell is a stone-sized *circle* (coverage of low-S/dark pixels within the disk, and/or circularity `4πA/P²`) to reject non-round false positives (glare, wood knots, hand edges); optionally snap sampling to the detected circle centre to correct minor grid misalignment. Add only if residual false positives / alignment errors appear in testing.
 
 **Motion & occlusion gating (not a fixed timer):** sampling is fast (`SAMPLE_INTERVAL=400`ms) but frames are filtered. `_motion` = fraction of pixels that changed since the last frame; above `MOTION_THRESH` the scene is moving (a hand placing a stone) and the frame is skipped. `_computeOcclusion` flags a large border-touching blob (an arm reaching in) and invalidates the frame. A move is committed `QUIET_FRAMES` settled frames after the hand withdraws.
 
-**Tentative-confirm model:** a detected move stays *tentative* until the opponent's reply confirms it (`_resolveTentative`). `boardState` is the live DISPLAY (confirmed + one provisional move); `_confirmed` is only what's emitted to the SGF. Competing same-colour candidates for one turn are held until one survives or the opponent forces a pick (`_mostStoneLike`, chosen by closeness to confirmed same-colour deltas). Go capture/suicide rules are applied throughout.
+**Tentative-confirm model:** a detected move stays *tentative* until the opponent's reply confirms it (`_resolveTentative`). `boardState` is the live DISPLAY (confirmed + one provisional move); `_confirmed` is only what's emitted to the SGF. Competing same-colour candidates for one turn are held until one survives or the opponent forces a pick (`_mostStoneLike`, chosen by closeness in value `V` to confirmed same-colour stones). Go capture/suicide rules are applied throughout.
 
 **False-disappearance recovery:** a stone leaves only by capture. A mature stone (`_age >= AGE_PROTECT`) that reads empty but whose group still has a liberty was not captured (shadow/partial occlusion) and is restored; a young vanished stone is let go (self-heals a transient false positive).
 
-**Manual fix + mid-game start:** `setBoardState(board, nextTurn, calibrate)` replaces the confirmed position wholesale (used by the 修正 Fix overlay and by undo). With `calibrate` (a fix, where stones are ground truth) it also runs `_recalibrate` and `_fixupBaseline`. `_fixupBaseline` resets any occupied cell whose baseline is far from the wood level (median of empty cells) back to wood — this lets the same Fix flow **start a game mid-position**: the first-frame baseline captured stone brightness on those cells, which would otherwise phantom-white a black stone when it's later captured. The corrected board becomes the SGF/broadcast start (Approach A: prior per-move history is dropped; see `sgf.js` setup stones and `viewer.html` `stateAt` seeding).
+**Manual fix + mid-game start:** `setBoardState(board, nextTurn, calibrate)` replaces the confirmed position wholesale (used by the 修正 Fix overlay and by undo). The corrected board becomes the SGF/broadcast start (Approach A: prior per-move history is dropped; see `sgf.js` setup stones and `viewer.html` `stateAt` seeding). Mid-game start also works *without* a fix now, because HSV classification needs no empty baseline. (The `calibrate` flag and the legacy `_recalibrate`/`_fixupBaseline` it triggers are dormant no-ops under the HSV path, kept pending cleanup.)
+
+**Legacy (dormant, pending removal):** the old brightness-delta classifier — `_captureBaseline`, `_baseline`, `_ambient`, `_deltaGrid`, `_classifyIntersection`, `_whiteDelta`/`_blackDelta`, `_recalibrate`, `_fixupBaseline` — is no longer on the code path (guards make it no-op). Remove after the HSV path is confirmed stable on device.
 
 ## Live broadcast (live.js + viewer.html)
 
@@ -77,10 +87,10 @@ SAMPLE_INTERVAL = 400   // ms between sampled frames (fast; motion gating filter
 QUIET_FRAMES    = 2     // settled frames of a stable new state before committing
 MOTION_THRESH   = 0.03  // fraction of changed pixels above which the frame is "moving"
 WARP_SIZE       = 760   // px for the perspective-corrected board image
-WHITE_DELTA     = 18    // ≥ this brightening vs empty ⇒ white (default; adapts after fix)
-BLACK_DELTA     = -70   // ≤ this darkening vs empty ⇒ black (default; adapts after fix)
 AGE_PROTECT     = 4     // valid frames a stone must survive to be capture-protected
 ```
+
+HSV classification (method A) uses no fixed colour constants — thresholds are ratios of the live-measured `woodS`/`woodV` (see above): black `V<0.60·woodV & S<0.70·woodS`, white `S<0.50·woodS & V>0.60·woodV`, wood reference from cells with `S ≥ P60`. (`WHITE_DELTA`/`BLACK_DELTA` remain only in the dormant legacy classifier.)
 
 ## SGF coordinates
 
